@@ -825,9 +825,13 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayConfigs(uint32_t *num_configs,
       /*
        * Limit to 1080p if large than 2160p
        */
-      if (ctx_.framebuffer_height >= 2160 && ctx_.framebuffer_width >= ctx_.framebuffer_height) {
-        ctx_.framebuffer_width = ctx_.framebuffer_width * (1080.0 / ctx_.framebuffer_height);
-        ctx_.framebuffer_height = 1080;
+      char value[PROPERTY_VALUE_MAX];
+      property_get("persist.framebuffer.support4kUI", value, "false");
+      if(strncmp(value, "false", 4) == 0) {
+        if (ctx_.framebuffer_height >= 2160 && ctx_.framebuffer_width >= ctx_.framebuffer_height) {
+          ctx_.framebuffer_width = ctx_.framebuffer_width * (1080.0 / ctx_.framebuffer_height);
+          ctx_.framebuffer_height = 1080;
+        }
       }
     } else {
       ctx_.framebuffer_width = 1920;
