@@ -41,7 +41,7 @@
 
 
 /*hwc version*/
-#define GHWC_VERSION                    "HWC2-1.1.175"
+#define GHWC_VERSION                    "HWC2-1.3.1"
 
 //Print call statck when you call ALOGD_CALLSTACK.
 #define ALOGD_CALLSTACK(...)                             \
@@ -54,6 +54,7 @@
 
 namespace android {
 
+#define UN_USED(arg)     (arg=arg)
 
 #define HWC2_ALOGD_IF_VERBOSE(x, ...)  \
     ALOGD_IF(LogLevel(DBG_VERBOSE),"%s,line=%d " x ,__FUNCTION__,__LINE__, ##__VA_ARGS__)
@@ -61,11 +62,17 @@ namespace android {
 #define HWC2_ALOGD_IF_DEBUG(x, ...)  \
     ALOGD_IF(LogLevel(DBG_DEBUG),"%s,line=%d " x ,__FUNCTION__,__LINE__, ##__VA_ARGS__)
 
+#define HWC2_ALOGD_IF_INFO(x, ...)  \
+    ALOGI_IF(LogLevel(DBG_INFO),"%s,line=%d " x ,__FUNCTION__,__LINE__, ##__VA_ARGS__)
+
 #define HWC2_ALOGE(x, ...)  \
     ALOGE("%s,line=%d " x ,__FUNCTION__,__LINE__, ##__VA_ARGS__)
 
 #define HWC2_ALOGI(x, ...)  \
     ALOGI("%s,line=%d " x ,__FUNCTION__,__LINE__, ##__VA_ARGS__)
+
+#define HWC2_ALOGW(x, ...)  \
+    ALOGW("%s,line=%d " x ,__FUNCTION__,__LINE__, ##__VA_ARGS__)
 
 
 enum LOG_LEVEL
@@ -104,5 +111,17 @@ int UpdateLogLevel();
 bool LogLevel(LOG_LEVEL log_level);
 void IncFrameCnt();
 int GetFrameCnt();
+int hwc_get_int_property(const char* pcProperty,const char* default_value);
+bool hwc_get_bool_property(const char* pcProperty,const char* default_value);
+int hwc_get_string_property(const char* pcProperty,const char* default_value,char* retult);
+
+bool isRK356x(uint32_t soc_id);
+bool isRK3566(uint32_t soc_id);
+bool isRK3399(uint32_t soc_id);
+bool isRK3588(uint32_t soc_id);
+
+bool isDrmVerison44(uint32_t drm_version);
+bool isDrmVerison419(uint32_t drm_version);
+bool isDrmVerison510(uint32_t drm_version);
 }
 #endif

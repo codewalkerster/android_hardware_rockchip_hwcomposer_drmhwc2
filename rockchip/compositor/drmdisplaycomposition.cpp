@@ -22,6 +22,8 @@
 #include "drmdisplaycompositor.h"
 #include "drmplane.h"
 #include "platform.h"
+#include "utils/drmfence.h"
+#include "utils/autolock.h"
 
 #include <stdlib.h>
 
@@ -36,29 +38,25 @@
 namespace android {
 
 DrmDisplayComposition::~DrmDisplayComposition() {
-  if (timeline_fd_ >= 0) {
     SignalCompositionDone();
-    close(timeline_fd_);
-  }
-
+    pthread_mutex_destroy(&lock_);
 }
 
 int DrmDisplayComposition::Init(DrmDevice *drm, DrmCrtc *crtc,
                                 Importer *importer, Planner *planner,
-                                uint64_t frame_no) {
+                                uint64_t frame_no,uint64_t display_id) {
   drm_ = drm;
   crtc_ = crtc;  // Can be NULL if we haven't modeset yet
   importer_ = importer;
   planner_ = planner;
   frame_no_ = frame_no;
+  display_id_ = display_id;
 
-
-  int ret = sw_sync_timeline_create();
-  if (ret < 0) {
-    ALOGE("Failed to create sw sync timeline %d", ret);
+  int ret = pthread_mutex_init(&lock_, NULL);
+  if (ret) {
+    ALOGE("Failed to initialize drm compositor lock %d\n", ret);
     return ret;
   }
-  timeline_fd_ = ret;
 
   return 0;
 }
@@ -117,7 +115,7 @@ int DrmDisplayComposition::AddPlaneDisable(DrmPlane *plane) {
   return 0;
 }
 
-int DrmDisplayComposition::AddPlaneComposition(DrmCompositionPlane plane) {
+int DrmDisplayComposition::AddPlaneComposition(DrmCompositionPlane &&plane) {
   composition_planes_.emplace_back(std::move(plane));
   return 0;
 }
@@ -138,69 +136,37 @@ int DrmDisplayComposition::DisableUnusedPlanes() {
     if((*iter)->bReserved)
       continue;
 
-    bool release_plane = false;
     bool disable_plane = false;
     //loop plane
     uint32_t crtc_mask = 1 << crtc()->pipe();
-    if((*iter)->is_release(crtc_mask) && (*iter)->release_necessary_cnt(crtc_mask)){
-        release_plane = true;
-    }else if((*iter)->acquire(crtc_mask)){
-        disable_plane = true;
+    if((*iter)->acquire(crtc_mask,display_id_)){
+      disable_plane = true;
     }
 
     if(isRK3566(soc_id))
       disable_plane = true;
 
     if(disable_plane){
-        for(std::vector<DrmPlane*> ::const_iterator iter_plane=(*iter)->planes.begin();
-              !(*iter)->planes.empty() && iter_plane != (*iter)->planes.end(); ++iter_plane) {
-              if (!(*iter_plane)->is_use()) {
-                  ALOGD_IF(LogLevel(DBG_DEBUG),"DisableUnusedPlanes plane_groups plane id=%d (%s) %s",
-                            (*iter_plane)->id(),(*iter_plane)->name(),
-                            release_plane ? "release_necessary_cnt plane" : "");
-                  AddPlaneDisable(*iter_plane);
-                 // break;
-              }
+      for(std::vector<DrmPlane*> ::const_iterator iter_plane=(*iter)->planes.begin();
+        !(*iter)->planes.empty() && iter_plane != (*iter)->planes.end(); ++iter_plane) {
+        if (!(*iter_plane)->is_use()) {
+            ALOGD_IF(LogLevel(DBG_DEBUG),"DisableUnusedPlanes plane_groups plane id=%d (%s)",
+                      (*iter_plane)->id(),(*iter_plane)->name());
+            AddPlaneDisable(*iter_plane);
+            // break;
         }
-    }
-
-    if(release_plane){
-        for(std::vector<DrmPlane*> ::const_iterator iter_plane=(*iter)->planes.begin();
-              !(*iter)->planes.empty() && iter_plane != (*iter)->planes.end(); ++iter_plane) {
-              ALOGD_IF(LogLevel(DBG_DEBUG),"DisableUnusedPlanes plane_groups plane id=%d (%s) %s",
-                        (*iter_plane)->id(),(*iter_plane)->name(),
-                        release_plane ? "release_necessary_cnt plane" : "");
-              AddPlaneDisable(*iter_plane);
-             // break;
-        }
+      }
     }
   }
   return 0;
 }
-int DrmDisplayComposition::CreateNextTimelineFence(const char* fence_name) {
-  ++timeline_;
-  ALOGV("rk-debug CreateNextTimelineFence timeline_fd_ =%d ,timeline_ = %d",timeline_fd_,timeline_);
-  return sw_sync_fence_create(timeline_fd_, fence_name,
-                                timeline_);
-}
-int DrmDisplayComposition::IncreaseTimelineToPoint(int point) {
-  int timeline_increase = point - timeline_current_;
-  if (timeline_increase <= 0)
-    return 0;
-  ALOGV("rk-debug IncreaseTimelineToPoint timeline_fd_ =%d ,point = %d ,timeline_current_ = %d ,timeline_increase = %d",timeline_fd_,point,timeline_current_,timeline_increase);
 
-  int ret = sw_sync_timeline_inc(timeline_fd_, timeline_increase);
-  if (ret)
-    ALOGE("Failed to increment sync timeline %d", ret);
-  else
-    timeline_current_ = point;
-
-  return ret;
-}
-
-int DrmDisplayComposition::CreateAndAssignReleaseFences() {
+int DrmDisplayComposition::CreateAndAssignReleaseFences(SyncTimeline &sync_timeline) {
   ATRACE_CALL();
-
+  AutoLock lock(&lock_, __func__);
+  if (lock.Lock())
+    return -1;
+  signal_ = false;
   std::unordered_set<DrmHwcLayer *> comp_layers;
 
   for (const DrmCompositionPlane &plane : composition_planes_) {
@@ -215,20 +181,103 @@ int DrmDisplayComposition::CreateAndAssignReleaseFences() {
   if(comp_layers.empty())
     return 0;
 
-  char acBuf[50];
+  char acBuf[32];
   for (DrmHwcLayer *layer : comp_layers) {
-    if (!layer || !layer->release_fence){
+    if (!layer){
       continue;
     }
-    sprintf(acBuf,"frame-%" PRIu64 ,frame_no_);
-    int ret = layer->release_fence.Set(CreateNextTimelineFence(acBuf));
-    if (ret < 0){
-        ALOGE("creat release fence failed ret=%d,%s",ret,strerror(errno));
-      return ret;
+    int sync_timeline_cnt = sync_timeline.IncTimeline();
+    sprintf(acBuf,"RFD%" PRIu64 "-FN%" PRIu64 "-TC%d" ,display_id_, frame_no_, sync_timeline_cnt);
+    layer->release_fence = sp<ReleaseFence>(new ReleaseFence(sync_timeline, sync_timeline_cnt, acBuf));
+    if (layer->release_fence->isValid()){
+      HWC2_ALOGD_IF_DEBUG(" Create ReleaseFence(%s) Sucess: frame = %" PRIu64 " LayerName=%s",acBuf, frame_no_, layer->sLayerName_.c_str());
+#ifdef USE_LIBSVEP
+      if(layer->bUseSvep_){
+        layer->pSvepBuffer_->SetReleaseFence(dup(layer->release_fence->getFd()));
+        HWC2_ALOGD_IF_DEBUG(" Create SvepReleaseFence(%s) Sucess: frame = %" PRIu64 " LayerName=%s",acBuf, frame_no_, layer->sLayerName_.c_str());
+      }
+#endif
+    }else{
+      HWC2_ALOGE(" Create ReleaseFence(%s) Fail!: frame = %" PRIu64 " LayerName=%s",acBuf, frame_no_, layer->sLayerName_.c_str());
+      return -1;
     }
-    //ALOGD("%s,line=%d layerId = %" PRIu32 " frame no = %" PRIu64 " releaseFd = %d" ,__FUNCTION__,__LINE__,
-    //      layer->uId_,frame_no_,layer->release_fence.get());
   }
+  return 0;
+}
+
+sp<ReleaseFence> DrmDisplayComposition::GetReleaseFence(hwc2_layer_t layer_id) {
+  ATRACE_CALL();
+  AutoLock lock(&lock_, __func__);
+  if (lock.Lock())
+    return ReleaseFence::NO_FENCE;
+  std::unordered_set<DrmHwcLayer *> comp_layers;
+
+  for (const DrmCompositionPlane &plane : composition_planes_) {
+    if (plane.type() == DrmCompositionPlane::Type::kLayer) {
+      for (auto i : plane.source_layers()) {
+        DrmHwcLayer *source_layer = &layers_[i];
+        comp_layers.emplace(source_layer);
+      }
+    }
+  }
+
+  if(comp_layers.empty())
+    return 0;
+
+  char acBuf[32];
+  for (DrmHwcLayer *layer : comp_layers) {
+    if (!layer){
+      continue;
+    }
+    if(layer->uId_ == layer_id){
+      return layer->release_fence;
+    }
+  }
+  return ReleaseFence::NO_FENCE;
+}
+
+int DrmDisplayComposition::SignalCompositionDone() {
+  ATRACE_CALL();
+  AutoLock lock(&lock_, __func__);
+  if (lock.Lock())
+    return -1;
+
+  if(signal_){
+    HWC2_ALOGD_IF_VERBOSE("Have been signal frame = %" PRIu64", not to signal.",frame_no_);
+    return 0;
+  }
+  HWC2_ALOGD_IF_DEBUG("Will to signal frame = %" PRIu64,frame_no_);
+  std::unordered_set<DrmHwcLayer *> comp_layers;
+  for (const DrmCompositionPlane &plane : composition_planes_) {
+    if (plane.type() == DrmCompositionPlane::Type::kLayer) {
+      for (auto i : plane.source_layers()) {
+        DrmHwcLayer *source_layer = &layers_[i];
+        comp_layers.emplace(source_layer);
+      }
+    }
+  }
+
+  if(comp_layers.empty())
+    return 0;
+
+  for (DrmHwcLayer *layer : comp_layers) {
+    if (!layer || !layer->release_fence->isValid()){
+      continue;
+    }
+    int act,sig;
+    if(LogLevel(DBG_DEBUG)){
+      act = layer->release_fence->getActiveCount();
+      sig = layer->release_fence->getSignaledCount();
+    }
+    int ret = layer->release_fence->signal();
+    if(LogLevel(DBG_DEBUG))
+      HWC2_ALOGD_IF_DEBUG("Signal %s frame = %" PRIu64 " %s Info: size=%d act=%d signal=%d err=%d LayerName=%s ",
+                          act == 1 && sig == 0 && layer->release_fence->getActiveCount() == 0 && layer->release_fence->getSignaledCount() == 1 ? "Sucess" : "Fail",
+                          frame_no_,layer->release_fence->getName().c_str(),layer->release_fence->getSize(),layer->release_fence->getActiveCount(),
+                          layer->release_fence->getSignaledCount(),layer->release_fence->getErrorCount(),
+                          layer->sLayerName_.c_str());
+  }
+  signal_ = true;
   return 0;
 }
 

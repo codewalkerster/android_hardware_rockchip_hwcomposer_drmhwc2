@@ -14,13 +14,21 @@
  * limitations under the License.
  */
 
+#ifndef DRM_HWC_TWO_H
+#define DRM_HWC_TWO_H
 #include "drmdisplaycompositor.h"
-#include "drmhwcomposer.h"
+#include "drmlayer.h"
 #include "resourcemanager.h"
 #include "vsyncworker.h"
 #include "platform.h"
 #include "rockchip/drmgralloc.h"
 #include "rockchip/invalidateworker.h"
+#include "utils/drmfence.h"
+
+#include "drmbufferqueue.h"
+#ifdef USE_LIBSVEP
+#include "Svep.h"
+#endif
 
 #include <hardware/hwcomposer2.h>
 
@@ -30,9 +38,11 @@ namespace android {
 
 class DrmGralloc;
 class DrmHwcTwo;
+class GemHandle;
+class ResourceManager;
+class DrmDisplayCompositor;
 
-
-DrmHwcTwo *g_ctx = NULL;
+static DrmHwcTwo *g_ctx = NULL;
 
 #define MAX_NUM_BUFFER_SLOTS 32
 
@@ -46,19 +56,25 @@ class DrmHwcTwo : public hwc2_device_t {
   HWC2::Error Init();
 
  private:
+
   class HwcLayer {
    public:
-    HwcLayer(uint32_t layer_id){
+    HwcLayer(uint32_t layer_id, DrmDevice *drm){
       id_ = layer_id;
       drmGralloc_ = DrmGralloc::getInstance();
+      drm_ = drm;
       bufferInfoMap_.clear();
-    }
+    };
 
     void clear(){
       buffer_ = NULL;
-      acquire_fence_.Close();
-      release_fence_.Close();
-      next_release_fence_.Close();
+      if(sidebandStreamHandle_ != NULL){
+        int ret = drmGralloc_->freeBuffer(sidebandStreamHandle_);
+        if(ret){
+          ALOGE("freeBuffer sidebandStreamHandle = %p fail, ret=%d",sidebandStreamHandle_,ret);
+        }
+        sidebandStreamHandle_ = NULL;
+      }
     }
 
     HWC2::Composition sf_type() const {
@@ -81,6 +97,42 @@ class DrmHwcTwo : public hwc2_device_t {
       return z_order_;
     }
 
+    class GemHandle {
+      public:
+        GemHandle(){};
+        ~GemHandle(){
+          if(uBufferId_ == 0 || uGemHandle_ == 0)
+            return;
+          int ret = drmGralloc_->hwc_free_gemhandle(uBufferId_);
+          if(ret){
+            HWC2_ALOGE("%s hwc_free_gemhandle fail, buffer_id =%" PRIx64, name_, uBufferId_);
+          }
+
+        };
+
+        int InitGemHandle(DrmDevice *drm,
+                          DrmGralloc *drm_gralloc,
+                          const char *name,
+                          uint64_t buffer_fd,
+                          uint64_t buffer_id){
+            drm_ = drm;
+            drmGralloc_ = drm_gralloc;
+            name_ = name;
+            uBufferId_ = buffer_id;
+            int ret = drmGralloc_->hwc_get_gemhandle_from_fd(buffer_fd, uBufferId_, &uGemHandle_);
+            if(ret){
+              HWC2_ALOGE("%s hwc_get_gemhandle_from_fd fail, buffer_id =%" PRIx64, name_, uBufferId_);
+            }
+            return ret;
+        };
+        uint32_t GetGemHandle(){ return uGemHandle_;};
+      private:
+        DrmDevice *drm_;
+        DrmGralloc *drmGralloc_;
+        uint64_t uBufferId_=0;
+        uint32_t uGemHandle_=0;
+        const char *name_;
+    };
     typedef struct bufferInfo{
       bufferInfo(){};
       int iFd_=0;
@@ -88,11 +140,14 @@ class DrmHwcTwo : public hwc2_device_t {
       int iWidth_=0;
       int iHeight_=0;
       int iStride_=0;
+      int iSize_=0;
       int iByteStride_=0;
       int iUsage_=0;
       uint32_t uFourccFormat_=0;
+      uint32_t uGemHandle_=0;
       uint64_t uModifier_=0;
       uint64_t uBufferId_;
+      GemHandle gemHandle_;
       std::string sLayerName_;
     }bufferInfo_t;
 
@@ -129,10 +184,12 @@ class DrmHwcTwo : public hwc2_device_t {
           HWC2_ALOGD_IF_VERBOSE("bufferInfoMap_ emplace fail! BufferHandle=%p",buffer);
         }else{
           pBufferInfo_ = ret.first->second;
+          pBufferInfo_->uBufferId_ = buffer_id;
           pBufferInfo_->iFd_     = drmGralloc_->hwc_get_handle_primefd(buffer_);
           pBufferInfo_->iWidth_  = drmGralloc_->hwc_get_handle_attibute(buffer_,ATT_WIDTH);
           pBufferInfo_->iHeight_ = drmGralloc_->hwc_get_handle_attibute(buffer_,ATT_HEIGHT);
           pBufferInfo_->iStride_ = drmGralloc_->hwc_get_handle_attibute(buffer_,ATT_STRIDE);
+          pBufferInfo_->iSize_   = drmGralloc_->hwc_get_handle_attibute(buffer_,ATT_SIZE);
           pBufferInfo_->iByteStride_ = drmGralloc_->hwc_get_handle_attibute(buffer_,ATT_BYTE_STRIDE_WORKROUND);
           pBufferInfo_->iFormat_ = drmGralloc_->hwc_get_handle_attibute(buffer_,ATT_FORMAT);
           pBufferInfo_->iUsage_   = drmGralloc_->hwc_get_handle_usage(buffer_);
@@ -140,6 +197,8 @@ class DrmHwcTwo : public hwc2_device_t {
           pBufferInfo_->uModifier_ = drmGralloc_->hwc_get_handle_format_modifier(buffer_);
           drmGralloc_->hwc_get_handle_name(buffer_,pBufferInfo_->sLayerName_);
           layer_name_ = pBufferInfo_->sLayerName_;
+          pBufferInfo_->gemHandle_.InitGemHandle(drm_, drmGralloc_, pBufferInfo_->sLayerName_.c_str(), pBufferInfo_->iFd_, buffer_id);
+          pBufferInfo_->uGemHandle_ = pBufferInfo_->gemHandle_.GetGemHandle();
           HWC2_ALOGD_IF_VERBOSE("bufferInfoMap_ size = %zu insert success! BufferId=%" PRIx64 " Name=%s",
                                bufferInfoMap_.size(),buffer_id,pBufferInfo_->sLayerName_.c_str());
         }
@@ -151,40 +210,89 @@ class DrmHwcTwo : public hwc2_device_t {
       }
     }
 
-    int take_acquire_fence() {
-      return acquire_fence_.Release();
-    }
-    void set_acquire_fence(int acquire_fence) {
-      acquire_fence_.Set(dup(acquire_fence));
+    void setSidebandStream(buffer_handle_t stream) {
+      if(stream != sidebandStreamHandle_){
+        if(sidebandStreamHandle_ != NULL){
+          int ret = drmGralloc_->freeBuffer(sidebandStreamHandle_);
+          if(ret){
+            ALOGE("freeBuffer sidebandStreamHandle = %p fail, ret=%d",sidebandStreamHandle_,ret);
+          }
+          sidebandStreamHandle_ = NULL;
+        }
+
+        if(stream != NULL){
+          buffer_handle_t tempHandle;
+          int ret = drmGralloc_->importBuffer(stream,&tempHandle);
+          if(ret){
+            ALOGE("importBuffer stream=%p, tempHandle=%p fail, ret=%d",stream,tempHandle,ret);
+          }
+          sidebandStreamHandle_ = tempHandle;
+        }
+      }
+      // Bufferinfo Cache
+      uint64_t buffer_id;
+      drmGralloc_->hwc_get_handle_buffer_id(sidebandStreamHandle_, &buffer_id);
+
+      bufferInfoMap_.clear();
+      auto ret = bufferInfoMap_.emplace(std::make_pair(buffer_id, std::make_shared<bufferInfo_t>(bufferInfo())));
+      if(ret.second == false){
+        HWC2_ALOGD_IF_VERBOSE("bufferInfoMap_ emplace fail! BufferHandle=%p",sidebandStreamHandle_);
+      }else{
+        pBufferInfo_ = ret.first->second;
+        pBufferInfo_->uBufferId_ = buffer_id;
+        pBufferInfo_->iFd_     = drmGralloc_->hwc_get_handle_primefd(sidebandStreamHandle_);
+        pBufferInfo_->iWidth_  = drmGralloc_->hwc_get_handle_attibute(sidebandStreamHandle_,ATT_WIDTH);
+        pBufferInfo_->iHeight_ = drmGralloc_->hwc_get_handle_attibute(sidebandStreamHandle_,ATT_HEIGHT);
+        pBufferInfo_->iStride_ = drmGralloc_->hwc_get_handle_attibute(sidebandStreamHandle_,ATT_STRIDE);
+        pBufferInfo_->iByteStride_ = drmGralloc_->hwc_get_handle_attibute(sidebandStreamHandle_,ATT_BYTE_STRIDE_WORKROUND);
+        pBufferInfo_->iFormat_ = drmGralloc_->hwc_get_handle_attibute(sidebandStreamHandle_,ATT_FORMAT);
+        pBufferInfo_->iUsage_   = drmGralloc_->hwc_get_handle_usage(sidebandStreamHandle_);
+        pBufferInfo_->uFourccFormat_ = drmGralloc_->hwc_get_handle_fourcc_format(sidebandStreamHandle_);
+        pBufferInfo_->uModifier_ = drmGralloc_->hwc_get_handle_format_modifier(sidebandStreamHandle_);
+        drmGralloc_->hwc_get_handle_name(sidebandStreamHandle_,pBufferInfo_->sLayerName_);
+        layer_name_ = pBufferInfo_->sLayerName_;
+        pBufferInfo_->gemHandle_.InitGemHandle(drm_, drmGralloc_, pBufferInfo_->sLayerName_.c_str(), pBufferInfo_->iFd_, buffer_id);
+        pBufferInfo_->uGemHandle_ = pBufferInfo_->gemHandle_.GetGemHandle();
+        HWC2_ALOGD_IF_VERBOSE("bufferInfoMap_ size = %zu insert success! BufferId=%" PRIx64 " Name=%s",
+                            bufferInfoMap_.size(),buffer_id,pBufferInfo_->sLayerName_.c_str());
+
+      }
     }
 
-    int release_fence() {
+
+    void set_acquire_fence(sp<AcquireFence> af) {
+      acquire_fence_ = af;
+    }
+
+    const sp<AcquireFence> acquire_fence(){
+      return acquire_fence_;
+    }
+
+    void set_release_fence(sp<ReleaseFence> rf) {
+      release_fence_.add(rf);
+    }
+
+    const sp<ReleaseFence> release_fence(){
       return release_fence_.get();
     }
-    int next_release_fence() {
-      return next_release_fence_.get();
-    }
-    int take_release_fence() {
-      return release_fence_.Release();
-    }
-    void manage_release_fence() {
-      release_fence_ = std::move(next_release_fence_);
-      next_release_fence_ = -1;
-    }
-    void manage_next_release_fence() {
-      next_release_fence_.Set(release_fence_raw_);
-      release_fence_raw_ = -1;
-    }
-    OutputFd release_fence_output() {
-      return OutputFd(&release_fence_raw_);
+
+    const sp<ReleaseFence> back_release_fence(){
+      return release_fence_.get_back();
     }
 
     uint32_t id(){ return id_; }
 
-    void PopulateDrmLayer(hwc2_layer_t layer_id,DrmHwcLayer *layer, hwc2_drm_display_t* ctx,
-                                 uint32_t frame_no);
-    void PopulateFB(hwc2_layer_t layer_id, DrmHwcLayer *drmHwcLayer,
-                        hwc2_drm_display_t* ctx, uint32_t frame_no, bool validate);
+    void PopulateDrmLayer(hwc2_layer_t layer_id,
+                          DrmHwcLayer *layer,
+                          hwc2_drm_display_t* ctx,
+                          uint32_t frame_no);
+
+    void PopulateFB(hwc2_layer_t layer_id,
+                    DrmHwcLayer *drmHwcLayer,
+                    hwc2_drm_display_t* ctx,
+                    uint32_t frame_no,
+                    bool validate);
+
     void DumpLayerInfo(String8 &output);
 
     int DumpData();
@@ -192,6 +300,8 @@ class DrmHwcTwo : public hwc2_device_t {
     void EnableAfbc() { is_afbc_ = true;};
     void DisableAfbc() { is_afbc_ = false;};
     bool isAfbc() { return is_afbc_;};
+
+    int DoSvep(bool validate, DrmHwcLayer *drmHwcLayer);
 
     // Layer hooks
     HWC2::Error SetCursorPosition(int32_t x, int32_t y);
@@ -217,10 +327,10 @@ class DrmHwcTwo : public hwc2_device_t {
 
     HWC2::BlendMode blending_ = HWC2::BlendMode::None;
     buffer_handle_t buffer_ = NULL;
-    UniqueFd acquire_fence_;
-    int release_fence_raw_ = -1;
-    UniqueFd release_fence_;
-    UniqueFd next_release_fence_;
+    // Sidebande
+    buffer_handle_t sidebandStreamHandle_ = NULL;
+    sp<AcquireFence> acquire_fence_ = AcquireFence::NO_FENCE;
+    DeferredReleaseFence release_fence_;
     hwc_rect_t display_frame_;
     float alpha_ = 1.0f;
     hwc_frect_t source_crop_;
@@ -234,6 +344,7 @@ class DrmHwcTwo : public hwc2_device_t {
 
     uint32_t id_;
     DrmGralloc *drmGralloc_;
+    DrmDevice *drm_;
 
     // Buffer info map
     bool bHasCache_ = false;
@@ -241,6 +352,13 @@ class DrmHwcTwo : public hwc2_device_t {
 
     // Buffer info point
     std::shared_ptr<bufferInfo_t> pBufferInfo_;
+
+#ifdef USE_LIBSVEP
+    std::shared_ptr<DrmBufferQueue> bufferQueue_;
+    Svep* svep_;
+    bool bSvepReady_;
+    SvepContext svepCtx_;
+#endif
   };
 
   struct HwcCallback {
@@ -262,11 +380,15 @@ class DrmHwcTwo : public hwc2_device_t {
 
     HWC2::Error RegisterVsyncCallback(hwc2_callback_data_t data,
                                       hwc2_function_pointer_t func);
+    HWC2::Error UnregisterVsyncCallback();
 
     HWC2::Error RegisterInvalidateCallback(hwc2_callback_data_t data,
                                       hwc2_function_pointer_t func);
-    void ClearDisplay();
-    void ReleaseResource();
+
+    HWC2::Error UnregisterInvalidateCallback();
+
+    int ClearDisplay();
+    int ReleaseResource();
 
     HWC2::Error CheckDisplayState();
 
@@ -306,6 +428,7 @@ class DrmHwcTwo : public hwc2_device_t {
     HWC2::Error SetColorTransform(const float *matrix, int32_t hint);
     HWC2::Error SetOutputBuffer(buffer_handle_t buffer, int32_t release_fence);
     HWC2::Error SetPowerMode(int32_t mode);
+    HWC2::Error SyncPowerMode();
     HWC2::Error SetVsyncEnabled(int32_t enabled);
     HWC2::Error ValidateDisplay(uint32_t *num_types, uint32_t *num_requests);
     std::map<hwc2_layer_t, HwcLayer> &get_layers(){
@@ -327,11 +450,14 @@ class DrmHwcTwo : public hwc2_device_t {
    int UpdateDisplayMode();
    int UpdateHdmiOutputFormat();
    int UpdateBCSH();
+   int UpdateOverscan();
    int SwitchHdrMode();
 
    // Static Screen opt function
    int UpdateTimerEnable();
    int UpdateTimerState(bool gles_comp);
+   // SelfRefresh function
+   int SelfRefreshEnable();
    int EntreStaticScreen(uint64_t refresh, int refresh_cnt);
    int InvalidateControl(uint64_t refresh, int refresh_cnt);
 
@@ -340,10 +466,11 @@ class DrmHwcTwo : public hwc2_device_t {
     HWC2::Error InitDrmHwcLayer();
     HWC2::Error CreateComposition();
     void AddFenceToRetireFence(int fd);
+    int DoMirrorDisplay(int32_t *retire_fence);
 
     ResourceManager *resource_manager_;
     DrmDevice *drm_;
-    DrmDisplayCompositor compositor_;
+    std::shared_ptr<DrmDisplayCompositor> compositor_;
     std::shared_ptr<Importer> importer_;
     std::unique_ptr<Planner> planner_;
 
@@ -362,8 +489,6 @@ class DrmHwcTwo : public hwc2_device_t {
     uint32_t layer_idx_ = 1;
     std::map<hwc2_layer_t, HwcLayer> layers_;
     HwcLayer client_layer_;
-    UniqueFd retire_fence_;
-    UniqueFd next_retire_fence_;
     int32_t color_mode_;
     bool init_success_;
     bool validate_success_;
@@ -372,9 +497,13 @@ class DrmHwcTwo : public hwc2_device_t {
     bool static_screen_timer_enable_;
     bool static_screen_opt_;
     bool force_gles_;
+    bool bNeedSyncPMState_;
+    HWC2::PowerMode mPowerMode_;
     int fb_blanked;
 
     uint32_t frame_no_ = 0;
+    SyncTimeline sync_timeline_;
+    DeferredRetireFence d_retire_fence_;
   };
 
   class DrmHotplugHandler : public DrmEventHandler {
@@ -462,9 +591,10 @@ class DrmHwcTwo : public hwc2_device_t {
     return;
 };
 
-  ResourceManager resource_manager_;
+  ResourceManager *resource_manager_;
   std::map<hwc2_display_t, HwcDisplay> displays_;
   std::map<HWC2::Callback, HwcCallback> callbacks_;
   std::string mDumpString;
 };
 }  // namespace android
+#endif // DRM_HWC_TWO_H

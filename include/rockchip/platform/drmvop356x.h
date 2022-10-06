@@ -33,13 +33,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef ANDROID_DRM_VOP_H_
-#define ANDROID_DRM_VOP_H_
+#ifndef ANDROID_DRM_VOP_356x_H_
+#define ANDROID_DRM_VOP_356x_H_
 
 #include "platform.h"
 #include "drmdevice.h"
 
-
+#include <cutils/properties.h>
 
 namespace android {
 class DrmDevice;
@@ -47,12 +47,11 @@ class DrmDevice;
 // This plan stage places as many layers on dedicated planes as possible (first
 // come first serve), and then sticks the rest in a precomposition plane (if
 // needed).
-class PlanStageVop : public Planner::PlanStage {
+class Vop356x : public Planner::PlanStage {
 
 typedef std::map<int, std::vector<DrmHwcLayer*>> LayerMap;
 
-typedef enum tagComposeMode
-{
+typedef enum tagComposeMode{
    HWC_OVERLAY_LOPICY,
    HWC_MIX_SKIP_LOPICY,
    HWC_MIX_VIDEO_LOPICY,
@@ -65,11 +64,92 @@ typedef enum tagComposeMode
    HWC_DEBUG_POLICY
 }ComposeMode;
 
- public:
+typedef struct RequestContext{
+  int iSkipCnt=0;
 
-  bool SupportPlatform(uint32_t soc_id){ return false;};
+  // Afbcd info
+  int iAfbcdCnt=0;
+  int iAfbcdScaleCnt=0;
+  int iAfbcdYuvCnt=0;
+  int iAfcbdLargeYuvCnt=0;
+  int iAfbcdRotateCnt=0;
+  int iAfbcdHdrCnt=0;
+
+  // No Afbcd info
+  int iCnt=0;
+  int iScaleCnt=0;
+  int iYuvCnt=0;
+  int iLargeYuvCnt=0;
+  int iRotateCnt=0;
+  int iHdrCnt=0;
+} ReqCtx;
+
+typedef struct SupportContext{
+  // Afbcd info
+  int iAfbcdCnt=0;
+  int iAfbcdScaleCnt=0;
+  int iAfbcdYuvCnt=0;
+  int iAfbcdRotateCnt=0;
+  int iAfbcdHdrCnt=0;
+
+  // No Afbcd info
+  int iCnt=0;
+  int iScaleCnt=0;
+  int iYuvCnt=0;
+  int iRotateCnt=0;
+  int iHdrCnt=0;
+
+  // Reserved DrmPlane
+  char arrayReservedPlaneName[PROPERTY_VALUE_MAX] = {0};
+} SupCtx;
+
+typedef struct StateContext{
+  // Commit mirror function
+  bool bCommitMirrorMode=false;
+  DrmCrtc *pCrtcMirror=NULL;
+
+  // Cluster 0/1 two win mode
+  bool bClu0TwoWinMode=false;
+  bool bClu1TwoWinMode=false;
+  bool bClu0Used=false;
+  bool bClu1Used=false;
+  int iClu0UsedZ=-1;
+  int iClu1UsedZ=-1;
+  int iClu0UsedDstXOffset=0;
+  int iClu1UsedDstXOffset=0;
+
+  // Multi area
+  bool bMultiAreaEnable=false;
+  bool bMultiAreaScaleEnable=false;
+  bool bMultiAreaMode=false;
+  bool bSmartScaleEnable=false;
+
+  // Video state
+  bool bLargeVideo=false;
+  bool bDisableFBAfbcd=false;
+
+  // Soc id
+  int iSocId=0;
+  std::set<ComposeMode> setHwcPolicy;
+} StaCtx;
+
+typedef struct DrmVop2Context{
+  ReqCtx request;
+  SupCtx support;
+  StaCtx state;
+} Vop2Ctx;
+
+ public:
+  Vop356x(){ Init(); }
+  void Init();
+  bool SupportPlatform(uint32_t soc_id);
   int TryHwcPolicy(std::vector<DrmCompositionPlane> *composition,
-                        std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc, bool gles_policy);
+                   std::vector<DrmHwcLayer*> &layers,
+                   std::vector<PlaneGroup *> &plane_groups,
+                   DrmCrtc *crtc,
+                   bool gles_policy);
+  // Try to assign DrmPlane to display
+  int TryAssignPlane(DrmDevice* drm, const std::map<int,int> map_dpys);
 
  protected:
   int TryOverlayPolicy(std::vector<DrmCompositionPlane> *composition,
@@ -96,9 +176,26 @@ typedef enum tagComposeMode
   int MatchPlanes(std::vector<DrmCompositionPlane> *composition,
                       std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
                       std::vector<PlaneGroup *> &plane_groups);
-  int TryMatchPolicyFirst(std::vector<DrmHwcLayer*> &layers,
-                               std::vector<PlaneGroup *> &plane_groups,
-                               bool gles_policy);
+  int MatchBestPlanes(std::vector<DrmCompositionPlane> *composition,
+                      std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
+                      std::vector<PlaneGroup *> &plane_groups);
+  bool TryOverlay();
+  void TryMix();
+  void InitCrtcMirror(std::vector<DrmHwcLayer*> &layers,std::vector<PlaneGroup *> &plane_groups,DrmCrtc *crtc);
+  void UpdateResevedPlane(DrmCrtc *crtc);
+  bool CheckGLESLayer(DrmHwcLayer* layers);
+  void InitStateContext(
+      std::vector<DrmHwcLayer*> &layers,
+      std::vector<PlaneGroup *> &plane_groups,
+      DrmCrtc *crtc);
+  void InitRequestContext(std::vector<DrmHwcLayer*> &layers);
+  void InitSupportContext(
+      std::vector<PlaneGroup *> &plane_groups,
+      DrmCrtc *crtc);
+  int InitContext(std::vector<DrmHwcLayer*> &layers,
+      std::vector<PlaneGroup *> &plane_groups,
+      DrmCrtc *crtc,
+      bool gles_policy);
 
   bool HasLayer(std::vector<DrmHwcLayer*>& layer_vector,DrmHwcLayer *layer);
   int  IsXIntersect(hwc_rect_t* rec,hwc_rect_t* rec2);
@@ -125,20 +222,12 @@ typedef enum tagComposeMode
                      std::vector<PlaneGroup *> &plane_groups,
                      DrmCompositionPlane::Type type, DrmCrtc *crtc,
                      std::pair<int, std::vector<DrmHwcLayer*>> layers, int zpos, bool match_best);
+  int  MatchPlaneMirror(std::vector<DrmCompositionPlane> *composition_planes,
+                     std::vector<PlaneGroup *> &plane_groups,
+                     DrmCompositionPlane::Type type, DrmCrtc *crtc,
+                     std::pair<int, std::vector<DrmHwcLayer*>> layers, int zpos, bool match_best);
  private:
-  std::set<ComposeMode> setHwcPolicy;
-  int iReqAfbcdCnt=0;
-  int iReqScaleCnt=0;
-  int iReqYuvCnt=0;
-  int iReqSkipCnt=0;
-  int iReqRotateCnt=0;
-  int iReqHdrCnt=0;
-
-  int iSupportAfbcdCnt=0;
-  int iSupportScaleCnt=0;
-  int iSupportYuvCnt=0;
-  int iSupportRotateCnt=0;
-  int iSupportHdrCnt=0;
+  Vop2Ctx ctx;
 };
 
 }  // namespace android

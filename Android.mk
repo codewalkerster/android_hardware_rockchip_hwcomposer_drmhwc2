@@ -37,14 +37,31 @@ LOCAL_PATH := $(call my-dir)
 
 BOARD_USES_DRM_HWCOMPOSER2=false
 BOARD_USES_DRM_HWCOMPOSER=false
-ifeq ($(strip $(TARGET_BOARD_PLATFORM)),rk356x)
+# API 31 -> Android 12.0
+ifneq (1,$(strip $(shell expr $(PLATFORM_SDK_VERSION) \< 31)))
+# RK356x RK3588 use DrmHwc2
+ifneq ($(filter rk356x rk3588, $(strip $(TARGET_BOARD_PLATFORM))), )
 ifeq ($(strip $(BUILD_WITH_RK_EBOOK)),true)
         BOARD_USES_DRM_HWCOMPOSER2=false
 else  # BUILD_WITH_RK_EBOOK
         BOARD_USES_DRM_HWCOMPOSER2=true
 endif # BUILD_WITH_RK_EBOOK
 else
-        BOARD_USES_DRM_HWCOMPOSER=true
+        BOARD_USES_DRM_HWCOMPOSER2=false
+endif
+endif
+
+# API 30 -> Android 11.0
+ifneq (1,$(strip $(shell expr $(PLATFORM_SDK_VERSION) \< 30)))
+ifneq ($(filter rk356x rk3588, $(strip $(TARGET_BOARD_PLATFORM))), )
+ifeq ($(strip $(BUILD_WITH_RK_EBOOK)),true)
+        BOARD_USES_DRM_HWCOMPOSER2=false
+else  # BUILD_WITH_RK_EBOOK
+        BOARD_USES_DRM_HWCOMPOSER2=true
+endif # BUILD_WITH_RK_EBOOK
+else
+        BOARD_USES_DRM_HWCOMPOSER2=false
+endif
 endif
 
 ifeq ($(strip $(BOARD_USES_DRM_HWCOMPOSER2)),true)
@@ -52,15 +69,15 @@ ifeq ($(strip $(BOARD_USES_DRM_HWCOMPOSER2)),true)
 include $(CLEAR_VARS)
 
 LOCAL_SHARED_LIBRARIES := \
-	libcutils \
-	libdrm \
-	libhardware \
-	liblog \
-	libui \
-	libutils \
-	libsync_vendor \
-        libtinyxml2 \
-        libbaseparameter
+  libcutils \
+  libdrm \
+  libhardware \
+  liblog \
+  libui \
+  libutils \
+  libsync_vendor \
+  libtinyxml2 \
+  libbaseparameter
 
 LOCAL_STATIC_LIBRARIES := \
   libdrmhwcutils
@@ -71,12 +88,13 @@ LOCAL_C_INCLUDES := \
   system/core \
   system/core/libsync/include \
   external/tinyxml2 \
-  hardware/rockchip/libbaseparameter
+  hardware/rockchip/libbaseparameter \
+  hardware/rockchip/librga/include \
+  hardware/rockchip/librga/im2d_api
+
 
 LOCAL_SRC_FILES := \
   drmhwctwo.cpp \
-  compositor/drmdisplaycomposition.cpp \
-  compositor/drmdisplaycompositor.cpp \
   drm/drmconnector.cpp \
   drm/drmcrtc.cpp \
   drm/drmdevice.cpp \
@@ -88,17 +106,27 @@ LOCAL_SRC_FILES := \
   drm/drmcompositorworker.cpp \
   drm/resourcemanager.cpp \
   drm/vsyncworker.cpp \
-  platform/platform.cpp \
+  drm/invalidateworker.cpp \
   utils/autolock.cpp \
-  platform/platformdrmgeneric.cpp \
+  rockchip/compositor/drmdisplaycomposition.cpp \
+  rockchip/compositor/drmdisplaycompositor.cpp \
   rockchip/utils/drmdebug.cpp \
-  rockchip/hwcutils.cpp \
-  rockchip/drmtype.cpp \
-  rockchip/drmgralloc.cpp \
-  rockchip/platform/drmvop.cpp \
-  rockchip/platform/drmvop2.cpp \
-  rockchip/invalidateworker.cpp \
-  rockchip/drmbaseparameter.cpp
+  rockchip/common/drmfence.cpp \
+  rockchip/common/drmlayer.cpp \
+  rockchip/common/drmtype.cpp \
+  rockchip/common/drmgralloc.cpp \
+  rockchip/common/drmbaseparameter.cpp \
+  rockchip/platform/common/platformdrmgeneric.cpp \
+  rockchip/platform/common/platform.cpp \
+  rockchip/platform/rk3399/drmvop3399.cpp \
+  rockchip/platform/rk356x/drmvop356x.cpp \
+  rockchip/platform/rk3588/drmvop3588.cpp \
+  rockchip/platform/rk3399/drmhwc3399.cpp \
+  rockchip/platform/rk356x/drmhwc356x.cpp \
+  rockchip/platform/rk3588/drmhwc3588.cpp \
+  rockchip/common/drmbufferqueue.cpp \
+  rockchip/common/drmbuffer.cpp
+
 
 LOCAL_CPPFLAGS += \
   -DHWC2_USE_CPP11 \
@@ -106,7 +134,6 @@ LOCAL_CPPFLAGS += \
   -DRK_DRM_GRALLOC \
   -DUSE_HWC2 \
   -DMALI_AFBC_GRALLOC \
-  -DUSE_DRM_GENERIC_IMPORTER \
   -Wno-unreachable-code-loop-increment \
   -DUSE_NO_ASPECT_RATIO
 
@@ -124,10 +151,6 @@ LOCAL_C_INCLUDES += \
 
 LOCAL_CPPFLAGS += -DANDROID_R
 
-ifneq (,$(filter mali-tDVx mali-G52, $(TARGET_BOARD_PLATFORM_GPU)))
-LOCAL_CPPFLAGS += -DVOP2=1
-endif
-
 ifeq ($(TARGET_RK_GRALLOC_VERSION),4) # Gralloc 4.0
 
 LOCAL_CPPFLAGS += -DUSE_GRALLOC_4=1
@@ -138,7 +161,7 @@ LOCAL_SHARED_LIBRARIES += \
     android.hardware.graphics.mapper@4.0
 
 LOCAL_SRC_FILES += \
-    rockchip/drmgralloc4.cpp
+    rockchip/common/drmgralloc4.cpp
 
 LOCAL_HEADER_LIBRARIES += \
     libgralloc_headers
@@ -176,10 +199,23 @@ LOCAL_C_INCLUDES += \
 endif
 endif
 
-MAJOR_VERSION := "RK_GRAPHICS_VER=commit-id:$(shell cd $(LOCAL_PATH) && git log  -1 --oneline | awk '{print $$1}')"
-LOCAL_CPPFLAGS += -DRK_GRAPHICS_VER=\"$(MAJOR_VERSION)\"
+# BOARD_USES_LIBSVEP=true
+ifeq ($(strip $(BOARD_USES_LIBSVEP)),true)
+LOCAL_C_INCLUDES += \
+  hardware/rockchip/libsvep/include
+
+LOCAL_SHARED_LIBRARIES += \
+	libsvep \
+	librknnrt-svep \
+	libOpenCL \
+	librksvep
+
+LOCAL_CFLAGS += \
+	-DUSE_LIBSVEP=1
+endif
 
 LOCAL_MODULE := hwcomposer.$(TARGET_BOARD_HARDWARE)
+LOCAL_REQUIRED_MODULES := HwComposerEnv.xml
 
 # API 26 -> Android 8.0
 ifeq (1,$(strip $(shell expr $(PLATFORM_SDK_VERSION) \>= 26)))
@@ -187,14 +223,29 @@ LOCAL_PROPRIETARY_MODULE := true
 endif
 
 LOCAL_MODULE_TAGS := optional
-LOCAL_CFLAGS += -Wno-unused-function -Wno-unused-private-field -Wno-unused-function -Wno-unused-variable -Wno-unused-parameter
-LOCAL_CFLAGS += -DPLATFORM_SDK_VERSION=$(PLATFORM_SDK_VERSION)
+LOCAL_CFLAGS += \
+  -Wno-unused-function \
+  -Wno-unused-private-field \
+  -Wno-unused-function \
+  -Wno-unused-variable \
+  -Wno-unused-parameter \
+  -fPIC
+
 LOCAL_MODULE_RELATIVE_PATH := hw
 LOCAL_MODULE_CLASS := SHARED_LIBRARIES
 LOCAL_MODULE_SUFFIX := $(TARGET_SHLIB_SUFFIX)
 include $(BUILD_SHARED_LIBRARY)
 
+## copy init.qcom.test.rc from etc to /vendor/etc/init/hw
+include $(CLEAR_VARS)
+LOCAL_MODULE := HwComposerEnv.xml
+LOCAL_PROPRIETARY_MODULE := true
+LOCAL_MODULE_CLASS := ETC
+LOCAL_SRC_FILES := HwComposerEnv.xml
+include $(BUILD_PREBUILT)
+
 endif
+
 ifeq ($(strip $(BOARD_USES_DRM_HWCOMPOSER2)),true)
 include $(call all-makefiles-under,$(LOCAL_PATH))
 endif

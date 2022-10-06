@@ -18,14 +18,11 @@
 
 #include "platformdrmgeneric.h"
 #include "drmdevice.h"
-#include "platform.h"
 #if USE_GRALLOC_4
 #else
 #include "gralloc_drm_handle.h"
 #endif
 #include "rockchip/drmgralloc.h"
-#include "rockchip/platform/drmvop.h"
-#include "rockchip/platform/drmvop2.h"
 
 #include <drm_fourcc.h>
 #include <xf86drm.h>
@@ -35,12 +32,20 @@
 #include <hardware/gralloc.h>
 #include <log/log.h>
 
+#ifndef DRM_FORMAT_NV15
+/*
+ * 2 plane YCbCr
+ * index 0 = Y plane, [39:0] Y3:Y2:Y1:Y0 little endian
+ * index 1 = Cr:Cb plane, [39:0] Cr1:Cb1:Cr0:Cb0 little endian
+ */
+#define DRM_FORMAT_NV15		fourcc_code('N', 'V', '1', '5') /* 2x2 subsampled Cr:Cb plane */
+#endif
+
 
 #define ALIGN_DOWN( value, base)	(value & (~(base-1)) )
 
 namespace android {
 
-#ifdef USE_DRM_GENERIC_IMPORTER
 // static
 Importer *Importer::CreateInstance(DrmDevice *drm) {
   DrmGenericImporter *importer = new DrmGenericImporter(drm);
@@ -55,7 +60,6 @@ Importer *Importer::CreateInstance(DrmDevice *drm) {
   }
   return importer;
 }
-#endif
 
 DrmGenericImporter::DrmGenericImporter(DrmDevice *drm)
     : drm_(drm),
@@ -176,22 +180,16 @@ uint32_t DrmGenericImporter::DrmFormatToPlaneNum(uint32_t drm_format) {
     case DRM_FORMAT_NV16:
     case DRM_FORMAT_NV61:
     case DRM_FORMAT_NV12_10:
+    case DRM_FORMAT_NV15:
       return 2;
     default:
       return 1;
   }
 }
 
-
 int DrmGenericImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
 
-  uint32_t gem_handle;
-  int ret = drmPrimeFDToHandle(drm_->fd(), bo->fd, &gem_handle);
-  if (ret) {
-    ALOGE("failed to import prime fd %d ret=%d", bo->fd, ret);
-    return ret;
-  }
-
+  uint32_t gem_handle = bo->gem_handles[0];
   bo->pitches[0] = bo->byte_stride;
   bo->gem_handles[0] = gem_handle;
   bo->offsets[0] = 0;
@@ -209,7 +207,7 @@ int DrmGenericImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
   if(DrmFormatToPlaneNum(bo->format) == 2)
     modifier[1] = bo->modifier;
 
-  ret = drmModeAddFB2WithModifiers(drm_->fd(), bo->width, bo->height, bo->format,
+  int ret = drmModeAddFB2WithModifiers(drm_->fd(), bo->width, bo->height, bo->format,
                       bo->gem_handles, bo->pitches, bo->offsets, modifier,
 		                  &bo->fb_id, DRM_MODE_FB_MODIFIERS);
 
@@ -234,7 +232,7 @@ int DrmGenericImporter::ImportBuffer(buffer_handle_t handle, hwc_drm_bo_t *bo) {
   bo->layer_cnt = layer_count;
 
   // Fix "Failed to close gem handle" bug which lead by no reference counting.
-#if 1
+#if 0
   struct drm_gem_close gem_close;
   memset(&gem_close, 0, sizeof(gem_close));
 
@@ -295,13 +293,4 @@ bool DrmGenericImporter::CanImportBuffer(buffer_handle_t handle) {
 
   return true;
 }
-
-#ifdef USE_DRM_GENERIC_IMPORTER
-std::unique_ptr<Planner> Planner::CreateInstance(DrmDevice *) {
-  std::unique_ptr<Planner> planner(new Planner);
-  planner->AddStage<PlanStageVop2>();
-  planner->AddStage<PlanStageVop>();
-  return planner;
-}
-#endif
 }

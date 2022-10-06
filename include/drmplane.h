@@ -26,8 +26,117 @@
 #include <set>
 
 namespace android {
+class DrmPlane;
+typedef struct tagPlaneGroup{
+  bool     bReserved;
+  bool     bUse;
+  uint32_t zpos;
+  uint32_t possible_crtcs;
+  uint64_t share_id;
+  uint64_t win_type;
+  int64_t possible_display_=-1;
+	std::vector<DrmPlane*> planes;
 
-enum DrmPlaneType{
+  uint32_t current_crtc_ = 0;
+
+  bool acquire(uint32_t crtc_mask){
+    if(bReserved)
+      return false;
+
+    if(!(possible_crtcs & crtc_mask))
+      return false;
+
+    if(!(current_crtc_ & crtc_mask))
+      return false;
+
+    return true;
+  }
+
+  bool acquire(uint32_t crtc_mask, int64_t dispaly){
+    if(bReserved)
+      return false;
+
+    if(!(possible_crtcs & crtc_mask))
+      return false;
+
+    if(!(current_crtc_ & crtc_mask))
+      return false;
+
+    if(possible_display_ != dispaly)
+      return false;
+
+    return true;
+  }
+
+  bool set_current_crtc(uint32_t crtc_mask){
+    if(!(possible_crtcs & crtc_mask)){
+      return false;
+    }
+    current_crtc_ = crtc_mask;
+    return true;
+  }
+
+  bool set_current_crtc(uint32_t crtc_mask, int64_t display){
+    current_crtc_ = crtc_mask;
+    possible_display_ = display;
+    return true;
+  }
+
+}PlaneGroup;
+
+
+// RK3588
+enum DrmPlaneTypeRK3588{
+      // Cluster 0
+      PLANE_RK3588_CLUSTER0_WIN0 = 1 << 0,
+      PLANE_RK3588_CLUSTER0_WIN1 = 1 << 1,
+      // Cluster 1
+      PLANE_RK3588_CLUSTER1_WIN0 = 1 << 2,
+      PLANE_RK3588_CLUSTER1_WIN1 = 1 << 3,
+      // Cluster 2
+      PLANE_RK3588_CLUSTER2_WIN0 = 1 << 4,
+      PLANE_RK3588_CLUSTER2_WIN1 = 1 << 5,
+      // Cluster 3
+      PLANE_RK3588_CLUSTER3_WIN0 = 1 << 6,
+      PLANE_RK3588_CLUSTER3_WIN1 = 1 << 7,
+      // Esmart 0
+      PLANE_RK3588_ESMART0_WIN0 = 1 << 8,
+      PLANE_RK3588_ESMART0_WIN1 = 1 << 9,
+      PLANE_RK3588_ESMART0_WIN2 = 1 << 10,
+      PLANE_RK3588_ESMART0_WIN3 = 1 << 11,
+      // Esmart 1
+      PLANE_RK3588_ESMART1_WIN0 = 1 << 12,
+      PLANE_RK3588_ESMART1_WIN1 = 1 << 13,
+      PLANE_RK3588_ESMART1_WIN2 = 1 << 14,
+      PLANE_RK3588_ESMART1_WIN3 = 1 << 15,
+      // Esmart 2
+      PLANE_RK3588_ESMART2_WIN0 = 1 << 16,
+      PLANE_RK3588_ESMART2_WIN1 = 1 << 17,
+      PLANE_RK3588_ESMART2_WIN2 = 1 << 18,
+      PLANE_RK3588_ESMART2_WIN3 = 1 << 19,
+      // Esmart 3
+      PLANE_RK3588_ESMART3_WIN0 = 1 << 20,
+      PLANE_RK3588_ESMART3_WIN1 = 1 << 21,
+      PLANE_RK3588_ESMART3_WIN2 = 1 << 22,
+      PLANE_RK3588_ESMART3_WIN3 = 1 << 23,
+      // Cluster mask
+      PLANE_RK3588_ALL_CLUSTER0_MASK= 0x3,
+      PLANE_RK3588_ALL_CLUSTER1_MASK= 0xc,
+      PLANE_RK3588_ALL_CLUSTER2_MASK= 0x30,
+      PLANE_RK3588_ALL_CLUSTER3_MASK= 0xc0,
+
+      PLANE_RK3588_ALL_CLUSTER_MASK = 0xff,
+      // Esmart mask
+      PLANE_RK3588_ALL_ESMART0_MASK = 0xf00,
+      PLANE_RK3588_ALL_ESMART1_MASK = 0xf000,
+      PLANE_RK3588_ALL_ESMART2_MASK = 0xf0000,
+      PLANE_RK3588_ALL_ESMART3_MASK = 0xf00000,
+      PLANE_RK3588_ALL_ESMART_MASK = 0xffff00,
+      PLANE_RK3588_Unknown      = 0xffffffff,
+};
+
+// Rk356x
+enum DrmPlaneTypeRK356x{
       DRM_PLANE_TYPE_CLUSTER0_WIN0 = 1 << 0,
       DRM_PLANE_TYPE_CLUSTER0_WIN1 = 1 << 1,
 
@@ -56,17 +165,44 @@ enum DrmPlaneType{
 
       DRM_PLANE_TYPE_CLUSTER0_MASK= 0x3,
       DRM_PLANE_TYPE_CLUSTER1_MASK= 0xc,
-      DRM_PLANE_TYPE_CLUSTER_MASK = 0xf,
+
       DRM_PLANE_TYPE_ESMART0_MASK = 0xf0,
       DRM_PLANE_TYPE_ESMART1_MASK = 0xf00,
+
       DRM_PLANE_TYPE_SMART0_MASK  = 0xf000,
       DRM_PLANE_TYPE_SMART1_MASK  = 0xf0000,
-      DRM_PLANE_TYPE_Unknown      = 0xffffffff,
+
+      DRM_PLANE_TYPE_ALL_CLUSTER_MASK = 0xf,
+      DRM_PLANE_TYPE_ALL_ESMART_MASK  = 0xff0,
+      DRM_PLANE_TYPE_ALL_SMART_MASK   = 0xff000,
+      DRM_PLANE_TYPE_VOP2_Unknown      = 0xffffffff,
 };
 
-struct plane_type_name {
-  DrmPlaneType type;
-  const char *name;
+// RK3399/Rk3288/RK3328/RK3128
+enum DrmPlaneTypeRK3399{
+      DRM_PLANE_TYPE_VOP0_WIN0   = 1 << 0,
+      DRM_PLANE_TYPE_VOP0_WIN1   = 1 << 1,
+
+      DRM_PLANE_TYPE_VOP0_WIN2_0 = 1 << 2,
+      DRM_PLANE_TYPE_VOP0_WIN2_1 = 1 << 3,
+      DRM_PLANE_TYPE_VOP0_WIN2_2 = 1 << 4,
+      DRM_PLANE_TYPE_VOP0_WIN2_3 = 1 << 5,
+
+      DRM_PLANE_TYPE_VOP0_WIN3_0 = 1 << 6,
+      DRM_PLANE_TYPE_VOP0_WIN3_1 = 1 << 7,
+      DRM_PLANE_TYPE_VOP0_WIN3_2 = 1 << 8,
+      DRM_PLANE_TYPE_VOP0_WIN3_3 = 1 << 9,
+
+      DRM_PLANE_TYPE_VOP1_WIN0   = 1 << 10,
+
+      DRM_PLANE_TYPE_VOP1_WIN2_0 = 1 << 11,
+      DRM_PLANE_TYPE_VOP1_WIN2_1 = 1 << 12,
+      DRM_PLANE_TYPE_VOP1_WIN2_2 = 1 << 13,
+      DRM_PLANE_TYPE_VOP1_WIN2_3 = 1 << 14,
+
+      DRM_PLANE_TYPE_VOP0_MASK   = 0x3ff,
+      DRM_PLANE_TYPE_VOP1_MASK   = 0x7c,
+      DRM_PLANE_TYPE_VOP1_Unknown      = 0xffffffff,
 };
 
 enum DrmPlaneRotationType{
@@ -104,7 +240,7 @@ class DrmDevice;
 
 class DrmPlane {
  public:
-  DrmPlane(DrmDevice *drm, drmModePlanePtr p);
+  DrmPlane(DrmDevice *drm, drmModePlanePtr p, int soc_id);
   DrmPlane(const DrmPlane &) = delete;
   DrmPlane &operator=(const DrmPlane &) = delete;
 
@@ -116,8 +252,9 @@ class DrmPlane {
 
   uint32_t type() const;
 
-  DrmPlaneType win_type() const;
+  uint64_t win_type() const;
   const char* name() const;
+  void mark_type_by_name();
   const DrmProperty &crtc_property() const;
   const DrmProperty &fb_property() const;
   const DrmProperty &crtc_x_property() const;
@@ -143,6 +280,7 @@ class DrmPlane {
   const DrmProperty &output_w_property() const;
   const DrmProperty &output_h_property() const;
   const DrmProperty &scale_rate_property() const;
+  const DrmProperty &async_commit_property() const;
   bool is_use();
   void set_use(bool b_use);
   bool get_scale();
@@ -150,10 +288,7 @@ class DrmPlane {
   bool get_hdr2sdr();
   bool get_sdr2hdr();
   bool get_afbc();
-  bool get_afbc_prop();
   bool get_yuv();
-  int get_scale_rate_max();
-  int get_scale_rate_min();
   int get_input_w_max();
   int get_input_h_max();
   int get_output_w_max();
@@ -170,6 +305,18 @@ class DrmPlane {
   inline uint32_t get_possible_crtc_mask() const{ return possible_crtc_mask_; }
   inline void set_current_crtc_bit(uint32_t current_crtc) { current_crtc_ = current_crtc;}
   inline uint32_t get_current_crtc_bit() const{ return current_crtc_; }
+
+  // 8K
+  int get_input_w_max_8k();
+  int get_input_h_max_8k();
+  int get_output_w_max_8k();
+  int get_output_h_max_8k();
+  bool is_support_input_8k(int input_w, int input_h);
+  bool is_support_output_8k(int output_w, int output_h);
+  int  get_transform_8k();
+  bool is_support_transform_8k(int transform);
+  bool is_support_scale_8k(float scale_rate);
+
 
  private:
   DrmDevice *drm_;
@@ -206,6 +353,7 @@ class DrmPlane {
   DrmProperty output_w_property_;
   DrmProperty output_h_property_;
   DrmProperty scale_rate_property_;
+  DrmProperty async_commit_property_;
 
   bool bReserved_;
   bool b_use_;
@@ -216,7 +364,7 @@ class DrmPlane {
   bool b_sdr2hdr_;
   bool b_afbdc_;
   bool b_afbc_prop_;
-  DrmPlaneType win_type_;
+  uint64_t win_type_;
   const char *name_;
   uint32_t rotate_=0;
   int input_w_max_;
@@ -228,6 +376,7 @@ class DrmPlane {
 
   std::set<uint32_t> support_format_list;
   drmModePlanePtr plane_;
+  int soc_id_;
 };
 }  // namespace android
 

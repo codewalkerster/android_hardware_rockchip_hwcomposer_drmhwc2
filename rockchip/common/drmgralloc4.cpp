@@ -58,7 +58,6 @@
 
 #include <sync/sync.h>
 
-#include "mali_gralloc_formats.h"
 #include <drm_fourcc.h>
 
 #include "rockchip/drmgralloc4.h"
@@ -118,6 +117,10 @@ const static IMapper::MetadataType ArmMetadataType_PLANE_FDS
 	// static_cast<int64_t>(aidl::arm::graphics::ArmMetadataType::PLANE_FDS)
     1   // 就是上面的 'PLANE_FDS'
 };
+
+#ifndef DRM_FORMAT_NV15
+#define DRM_FORMAT_NV15 fourcc_code('N', 'V', '1', '5') /* 2x2 subsampled Cr:Cb plane */
+#endif
 
 /* ---------------------------------------------------------------------------------------------------------
  * External Function Prototypes (referenced in this file)
@@ -209,72 +212,6 @@ static int get_metadata(IMapper &mapper, buffer_handle_t handle, IMapper::Metada
 	return err;
 }
 
-/*
- * 参考 b_r25p1 gralloc 中的 drm_fourcc_from_handle() 实现.
- * 目前未考虑 'modifier'
- */
-uint64_t get_internal_format_from_fourcc(uint32_t fourcc, uint64_t modifier)
-{
-    uint64_t internal_format = 0;
-
-    /* Clean the modifier bits in the internal format. */
-    struct table_entry
-    {
-        uint64_t internal; // 不带 modifier_bits
-        uint32_t fourcc;
-    };
-
-    static table_entry table[] = {
-        { MALI_GRALLOC_FORMAT_INTERNAL_RAW16, DRM_FORMAT_R16 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_RGBA_8888, DRM_FORMAT_ABGR8888 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_BGRA_8888, DRM_FORMAT_ARGB8888 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_RGB_565, DRM_FORMAT_BGR565 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_RGBX_8888, DRM_FORMAT_XBGR8888 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_RGB_888, DRM_FORMAT_BGR888 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_RGBA_1010102, DRM_FORMAT_ABGR2101010 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_RGBA_16161616, DRM_FORMAT_ABGR16161616F },
-        { MALI_GRALLOC_FORMAT_INTERNAL_YV12, DRM_FORMAT_YVU420 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_NV12, DRM_FORMAT_NV12 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_NV16, DRM_FORMAT_NV16 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_NV21, DRM_FORMAT_NV21 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_Y0L2, DRM_FORMAT_Y0L2 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_Y210, DRM_FORMAT_Y210 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_P010, DRM_FORMAT_P010 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_P210, DRM_FORMAT_P210 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_Y410, DRM_FORMAT_Y410 },
-        { MALI_GRALLOC_FORMAT_INTERNAL_YUV422_8BIT, DRM_FORMAT_YUYV },
-        { MALI_GRALLOC_FORMAT_INTERNAL_YUV420_8BIT_I, DRM_FORMAT_YUV420_8BIT },
-        { MALI_GRALLOC_FORMAT_INTERNAL_YUV420_10BIT_I, DRM_FORMAT_YUV420_10BIT },
-
-        /* Deprecated legacy formats, mapped to MALI_GRALLOC_FORMAT_INTERNAL_YUV422_8BIT. */
-        { HAL_PIXEL_FORMAT_YCbCr_422_I, DRM_FORMAT_YUYV },
-        /* Deprecated legacy formats, mapped to MALI_GRALLOC_FORMAT_INTERNAL_NV21. */
-        { HAL_PIXEL_FORMAT_YCrCb_420_SP, DRM_FORMAT_NV21 },
-        /* Format introduced in Android P, mapped to MALI_GRALLOC_FORMAT_INTERNAL_P010. */
-        { HAL_PIXEL_FORMAT_YCBCR_P010, DRM_FORMAT_P010 },
-    };
-
-    V("'modifier' : 0x%" PRIx64, modifier);
-
-    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
-    {
-        if (table[i].fourcc == fourcc)
-        {
-            internal_format = table[i].internal;
-
-            if ( AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 == (modifier & AFBC_FORMAT_MOD_BLOCK_SIZE_16x16) )
-            {
-                internal_format = internal_format | GRALLOC_ARM_INTFMT_AFBC;    // 本应该是 MALI_GRALLOC_INTFMT_AFBC_BASIC.
-            }
-
-            return internal_format;
-        }
-    }
-
-    LOG_ALWAYS_FATAL("unexpected fourcc : 0x%x = %c%c%c%c", fourcc, fourcc , fourcc >> 8,fourcc >> 16,fourcc >> 24);
-    return 0;
-}
-
 android::status_t static decodeArmPlaneFds(const hidl_vec<uint8_t>& input, std::vector<int64_t>* fds)
 {
     assert (fds != nullptr);
@@ -351,26 +288,6 @@ uint32_t get_fourcc_format(buffer_handle_t handle)
       return fourcc;
     else
       return convertToNV12(fourcc);
-
-
-}
-
-uint64_t get_internal_format(buffer_handle_t handle)
-{
-    auto &mapper = get_service();
-    uint32_t fourcc;
-    uint64_t modifier;
-
-    /* 获取 format_fourcc. */
-    int err = get_metadata(mapper, handle, MetadataType_PixelFormatFourCC, decodePixelFormatFourCC, &fourcc);
-    assert(err == android::NO_ERROR);
-
-    /* 获取 format_modifier. */
-    err = get_metadata(mapper, handle, MetadataType_PixelFormatModifier, decodePixelFormatModifier, &modifier);
-    assert(err == android::NO_ERROR);
-
-    /* 从 fourcc 得到 internal_format. */
-    return (get_internal_format_from_fourcc(fourcc, modifier) );
 }
 
 int get_width(buffer_handle_t handle, uint64_t* width)
@@ -485,17 +402,38 @@ int get_byte_stride(buffer_handle_t handle, int* byte_stride)
     /* 否则, 即 'format_requested' "是" HAL_PIXEL_FORMAT_YCrCb_NV12_10, 则 ... */
     else
     {
-        uint64_t width;
+        uint32_t fourcc_format = get_fourcc_format(handle);
+        // RK3588 mali 支持NV15格式，故 byte_stride采用正确的值
+        if(fourcc_format == DRM_FORMAT_NV15){
+            err = get_metadata(mapper, handle, MetadataType_PlaneLayouts, decodePlaneLayouts, &layouts);
+            if (err != android::OK || layouts.size() < 1)
+            {
+                E("Failed to get plane layouts. err : %d", err);
+                return err;
+            }
 
-        err = get_width(handle, &width);
-        if (err != android::OK )
-        {
-            E("err : %d", err);
-            return err;
+            if ( layouts.size() > 1 )
+            {
+                // W("it's not reasonable to get global byte_stride of buffer with planes more than 1.");
+            }
+            *byte_stride = (layouts[0].strideInBytes);
         }
+        // 对于 fourcc不为 DRM_FORMAT_NV15 的情况，认为 Mali不支持 NV15格式,采用 width 作为 byte_stride.
+        else
+        {
 
-        // .KP : from CSY : 分配 rk_video_decoder 输出 buffers 时, 要求的 byte_stride of buffer in NV12_10, 已经通过 width 传入.
-        *byte_stride = (int)width;
+            uint64_t width;
+
+            err = get_width(handle, &width);
+            if (err != android::OK )
+            {
+                E("err : %d", err);
+                return err;
+            }
+
+            // .KP : from CSY : 分配 rk_video_decoder 输出 buffers 时, 要求的 byte_stride of buffer in NV12_10, 已经通过 width 传入.
+            *byte_stride = (int)width;
+        }
     }
 
     return err;
@@ -537,8 +475,8 @@ int get_byte_stride_workround(buffer_handle_t handle, int* byte_stride)
             *byte_stride = (layouts[0].strideInBytes);
         }else{
             if(format_requested == HAL_PIXEL_FORMAT_YUV420_8BIT_I
-               || format_requested == HAL_PIXEL_FORMAT_YUV420_10BIT_I
-               || format_requested == HAL_PIXEL_FORMAT_Y210){
+                || format_requested == HAL_PIXEL_FORMAT_YUV420_10BIT_I
+                || format_requested == HAL_PIXEL_FORMAT_Y210){
                 ALOGW_IF(LogLevel(android::DBG_DEBUG),"%s,line=%d ,vop driver workround: byte stride %" PRIi64 " => %" PRIi64,
                           __FUNCTION__,__LINE__,(layouts[0].strideInBytes),(layouts[0].strideInBytes) * 2 / 3);
                 *byte_stride = (layouts[0].strideInBytes) * 2 / 3;
@@ -554,17 +492,38 @@ int get_byte_stride_workround(buffer_handle_t handle, int* byte_stride)
     /* 否则, 即 'format_requested' "是" HAL_PIXEL_FORMAT_YCrCb_NV12_10, 则 ... */
     else
     {
-        uint64_t width;
+        uint32_t fourcc_format = get_fourcc_format(handle);
+        // RK3588 mali 支持NV15格式，故 byte_stride采用正确的值
+        if(fourcc_format == DRM_FORMAT_NV15){
+            err = get_metadata(mapper, handle, MetadataType_PlaneLayouts, decodePlaneLayouts, &layouts);
+            if (err != android::OK || layouts.size() < 1)
+            {
+                E("Failed to get plane layouts. err : %d", err);
+                return err;
+            }
 
-        err = get_width(handle, &width);
-        if (err != android::OK )
-        {
-            E("err : %d", err);
-            return err;
+            if ( layouts.size() > 1 )
+            {
+                // W("it's not reasonable to get global byte_stride of buffer with planes more than 1.");
+            }
+            *byte_stride = (layouts[0].strideInBytes);
         }
+        // 对于 fourcc不为 DRM_FORMAT_NV15 的情况，认为 Mali不支持 NV15格式,采用 width 作为 byte_stride.
+        else
+        {
 
-        // .KP : from CSY : 分配 rk_video_decoder 输出 buffers 时, 要求的 byte_stride of buffer in NV12_10, 已经通过 width 传入.
-        *byte_stride = (int)width;
+            uint64_t width;
+
+            err = get_width(handle, &width);
+            if (err != android::OK )
+            {
+                E("err : %d", err);
+                return err;
+            }
+
+            // .KP : from CSY : 分配 rk_video_decoder 输出 buffers 时, 要求的 byte_stride of buffer in NV12_10, 已经通过 width 传入.
+            *byte_stride = (int)width;
+        }
     }
 
     return err;
@@ -678,13 +637,13 @@ status_t importBuffer(buffer_handle_t rawHandle, buffer_handle_t* outHandle)
     return static_cast<status_t>((ret.isOk()) ? error : kTransactionError);
 }
 
-void freeBuffer(buffer_handle_t handle)
-{
+status_t freeBuffer(buffer_handle_t handle){
     auto &mapper = get_service();
     auto buffer = const_cast<native_handle_t*>(handle);
     auto ret = mapper.freeBuffer(buffer);
 
     auto error = (ret.isOk()) ? static_cast<Error>(ret) : kTransactionError;
+    return static_cast<status_t>(error);
 }
 
 status_t lock(buffer_handle_t bufferHandle,

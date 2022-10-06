@@ -26,11 +26,24 @@
 #include <hardware/hardware.h>
 #include <hardware/hwcomposer2.h>
 
-#include "autofd.h"
+#include "utils/autofd.h"
 #include "drmhwcgralloc.h"
 #include "rockchip/drmtype.h"
+#include "utils/drmfence.h"
+#include "drmbuffer.h"
 
 struct hwc_import_context;
+
+#include "rockchip/drmgralloc.h"
+
+#define hwcMIN(x, y)			(((x) <= (y)) ?  (x) :  (y))
+#define hwcMAX(x, y)			(((x) >= (y)) ?  (x) :  (y))
+#define IS_ALIGN(val,align)    (((val)&(align-1))==0)
+#ifndef ALIGN
+#define ALIGN( value, base ) (((value) + ((base) - 1)) & ~((base) - 1))
+#endif
+#define ALIGN_DOWN( value, base)	(value & (~(base-1)) )
+
 
 int hwc_import_init(struct hwc_import_context **ctx);
 int hwc_import_destroy(struct hwc_import_context *ctx);
@@ -41,16 +54,6 @@ bool hwc_import_bo_release(int fd, struct hwc_import_context *ctx,
                            struct hwc_drm_bo *bo);
 
 namespace android {
-
-#define UN_USED(arg)     (arg=arg)
-
-int hwc_get_int_property(const char* pcProperty,const char* default_value);
-bool hwc_get_bool_property(const char* pcProperty,const char* default_value);
-int hwc_get_string_property(const char* pcProperty,const char* default_value,char* retult);
-bool isRK356x(uint32_t soc_id);
-bool isRK3566(uint32_t soc_id);
-
-
 class Importer;
 
 class DrmHwcBuffer {
@@ -85,8 +88,11 @@ class DrmHwcBuffer {
 
   int ImportBuffer(buffer_handle_t handle, Importer *importer);
 
-  int SetBoInfo(uint32_t fd, uint32_t width, uint32_t height, uint32_t format,
-        uint32_t hal_format, uint64_t modifier, uint32_t usage, uint32_t byte_stride);
+  int SetBoInfo(uint32_t fd, uint32_t width,
+                uint32_t height, uint32_t format,
+                uint32_t hal_format, uint64_t modifier,
+                uint32_t usage, uint32_t byte_stride,
+                uint32_t gem_handle);
  private:
   hwc_drm_bo bo_;
   Importer *importer_ = NULL;
@@ -144,6 +150,30 @@ enum class DrmHwcBlending : int32_t {
   kCoverage = HWC_BLENDING_COVERAGE,
 };
 
+struct DrmLayerInfoStore{
+  bool valid_ = false;
+
+  buffer_handle_t sf_handle = NULL;
+  uint32_t transform;
+  hwc_frect_t source_crop;
+  hwc_rect_t display_frame;
+
+  // Buffer info
+  int iFd_;
+  int iFormat_;
+  int iWidth_;
+  int iHeight_;
+  int iStride_;
+  int iByteStride_;
+  int iSize_;
+  int iUsage;
+  uint32_t uFourccFormat_;
+  uint64_t uModifier_;
+  uint64_t uBufferId_;
+  uint32_t uGemHandle_=0;
+  std::string sLayerName_;
+};
+
 struct DrmHwcLayer {
   buffer_handle_t sf_handle = NULL;
   int gralloc_buffer_usage = 0;
@@ -163,8 +193,8 @@ struct DrmHwcLayer {
   float fVScaleMulMirror_;
   hwc_rect_t display_frame_mirror;
 
-  UniqueFd acquire_fence;
-  OutputFd release_fence;
+  sp<AcquireFence> acquire_fence = AcquireFence::NO_FENCE;
+  sp<ReleaseFence> release_fence = ReleaseFence::NO_FENCE;
 
   // Display info
   uint32_t uAclk_=0;
@@ -185,14 +215,17 @@ struct DrmHwcLayer {
   float fVScaleMul_;
 
   // Buffer info
+  uint64_t uBufferId_;
   int iFd_;
   int iFormat_;
   int iWidth_;
   int iHeight_;
   int iStride_;
   int iByteStride_;
+  int iSize_;
   int iUsage;
   uint32_t uFourccFormat_;
+  uint32_t uGemHandle_;
   uint64_t uModifier_;
   std::string sLayerName_;
 
@@ -212,14 +245,27 @@ struct DrmHwcLayer {
   v4l2_colorspace uColorSpace = V4L2_COLORSPACE_DEFAULT;
   uint16_t uEOTF=0;
 
+  // Sideband Stream
+  bool bSidebandStreamLayer_;
+
+  bool bUseSvep_;
+  DrmLayerInfoStore storeLayerInfo_;
+  std::shared_ptr<DrmBuffer> pSvepBuffer_;
 
   int ImportBuffer(Importer *importer);
   int Init();
   int InitFromDrmHwcLayer(DrmHwcLayer *layer, Importer *importer);
+  void SetBlend(HWC2::BlendMode blend);
   void SetTransform(HWC2::Transform sf_transform);
   void SetSourceCrop(hwc_frect_t const &crop);
-  void SetDisplayFrame(hwc_rect_t const &frame);
+  void SetDisplayFrame(hwc_rect_t const &frame, hwc2_drm_display_t *ctx);
   void SetDisplayFrameMirror(hwc_rect_t const &frame);
+  void UpdateAndStoreInfoFromDrmBuffer(buffer_handle_t handle,
+      int fd, int format, int w, int h, int stride, int size,
+      int byte_stride, int usage, uint32_t fourcc, uint64_t modefier,
+      std::string name, hwc_frect_t &intput_crop, uint64_t buffer_id,
+      uint32_t gemhandle);
+  void ResetInfoFromStore();
 
   buffer_handle_t get_usable_handle() const {
     return handle.get() != NULL ? handle.get() : sf_handle;
@@ -235,14 +281,14 @@ struct DrmHwcLayer {
   bool IsSkipLayer();
   bool IsGlesCompose();
 
-  bool IsHdr(int usage);
+  bool IsHdr(int usage, android_dataspace_t dataspace);
   int GetSkipLine();
   v4l2_colorspace GetColorSpace(android_dataspace_t dataspace);
   supported_eotf_type GetEOTF(android_dataspace_t dataspace);
   std::string TransformToString(uint32_t transform) const;
   std::string BlendingToString(DrmHwcBlending blending) const;
   int DumpInfo(String8 &out);
-
+  int DumpData();
 };
 
 struct DrmHwcDisplayContents {

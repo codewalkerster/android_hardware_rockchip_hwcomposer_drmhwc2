@@ -34,26 +34,84 @@
  * limitations under the License.
  */
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
-#define LOG_TAG "drm-vop"
+#define LOG_TAG "drm-vop-3399"
 
-#include "rockchip/platform/drmvop2.h"
+#include "rockchip/platform/drmvop3399.h"
 #include "drmdevice.h"
 
 #include <log/log.h>
 
 namespace android {
 
-void PlanStageVop2::Init(){
+void Vop3399::Init(){
 
   ctx.state.bMultiAreaEnable = hwc_get_bool_property("vendor.hwc.multi_area_enable","true");
 
   ctx.state.bMultiAreaScaleEnable = hwc_get_bool_property("vendor.hwc.multi_area_scale_mode","true");
 
-  ctx.state.bSmartScaleEnable = hwc_get_bool_property("vendor.hwc.smart_scale_enable","false");
-
 }
 
-bool PlanStageVop2::HasLayer(std::vector<DrmHwcLayer*>& layer_vector,DrmHwcLayer *layer){
+bool Vop3399::SupportPlatform(uint32_t soc_id){
+  switch(soc_id){
+    case 0x3399:
+      return true;
+    default:
+      break;
+  }
+  return false;
+}
+
+int Vop3399::TryHwcPolicy(
+    std::vector<DrmCompositionPlane> *composition,
+    std::vector<DrmHwcLayer*> &layers,
+    std::vector<PlaneGroup *> &plane_groups,
+    DrmCrtc *crtc,
+    bool gles_policy) {
+
+  int ret;
+  // Get PlaneGroup
+  if(plane_groups.size() == 0){
+    ALOGE("%s,line=%d can't get plane_groups size=%zu",__FUNCTION__,__LINE__,plane_groups.size());
+    return -1;
+  }
+
+  // Init context
+  InitContext(layers,plane_groups,crtc,gles_policy);
+
+  // Try to match overlay policy
+  if(ctx.state.setHwcPolicy.count(HWC_OVERLAY_LOPICY)){
+    ret = TryOverlayPolicy(composition,layers,crtc,plane_groups);
+    if(!ret)
+      return 0;
+    else{
+      ALOGD_IF(LogLevel(DBG_DEBUG),"Match overlay policy fail, try to match other policy.");
+      TryMix();
+    }
+  }
+
+  // Try to match mix policy
+  if(ctx.state.setHwcPolicy.count(HWC_MIX_LOPICY)){
+    ret = TryMixPolicy(composition,layers,crtc,plane_groups);
+    if(!ret)
+      return 0;
+    else{
+      ALOGD_IF(LogLevel(DBG_DEBUG),"Match mix policy fail, try to match other policy.");
+      ctx.state.setHwcPolicy.insert(HWC_GLES_POLICY);
+    }
+  }
+
+  // Try to match GLES policy
+  if(ctx.state.setHwcPolicy.count(HWC_GLES_POLICY)){
+    ret = TryGLESPolicy(composition,layers,crtc,plane_groups);
+    if(!ret)
+      return 0;
+  }
+
+  ALOGE("%s,%d Can't match HWC policy",__FUNCTION__,__LINE__);
+  return -1;
+}
+
+bool Vop3399::HasLayer(std::vector<DrmHwcLayer*>& layer_vector,DrmHwcLayer *layer){
         for (std::vector<DrmHwcLayer*>::const_iterator iter = layer_vector.begin();
                iter != layer_vector.end(); ++iter) {
             if((*iter)->uId_==layer->uId_)
@@ -63,7 +121,7 @@ bool PlanStageVop2::HasLayer(std::vector<DrmHwcLayer*>& layer_vector,DrmHwcLayer
           return false;
 }
 
-int PlanStageVop2::IsXIntersect(hwc_rect_t* rec,hwc_rect_t* rec2){
+int Vop3399::IsXIntersect(hwc_rect_t* rec,hwc_rect_t* rec2){
     if(rec2->top == rec->top)
         return 1;
     else if(rec2->top < rec->top)
@@ -84,7 +142,7 @@ int PlanStageVop2::IsXIntersect(hwc_rect_t* rec,hwc_rect_t* rec2){
 }
 
 
-bool PlanStageVop2::IsRec1IntersectRec2(hwc_rect_t* rec1, hwc_rect_t* rec2){
+bool Vop3399::IsRec1IntersectRec2(hwc_rect_t* rec1, hwc_rect_t* rec2){
     int iMaxLeft,iMaxTop,iMinRight,iMinBottom;
     ALOGD_IF(LogLevel(DBG_DEBUG),"is_not_intersect: rec1[%d,%d,%d,%d],rec2[%d,%d,%d,%d]",rec1->left,rec1->top,
         rec1->right,rec1->bottom,rec2->left,rec2->top,rec2->right,rec2->bottom);
@@ -102,7 +160,7 @@ bool PlanStageVop2::IsRec1IntersectRec2(hwc_rect_t* rec1, hwc_rect_t* rec2){
     return false;
 }
 
-bool PlanStageVop2::IsLayerCombine(DrmHwcLayer * layer_one,DrmHwcLayer * layer_two){
+bool Vop3399::IsLayerCombine(DrmHwcLayer * layer_one,DrmHwcLayer * layer_two){
     if(!ctx.state.bMultiAreaEnable)
       return false;
 
@@ -110,6 +168,7 @@ bool PlanStageVop2::IsLayerCombine(DrmHwcLayer * layer_one,DrmHwcLayer * layer_t
     if(layer_one->iFormat_ >= HAL_PIXEL_FORMAT_YCrCb_NV12_10
         || layer_two->iFormat_ >= HAL_PIXEL_FORMAT_YCrCb_NV12_10
         || (layer_one->iFormat_ != layer_two->iFormat_)
+        || (layer_one->bAfbcd_ != layer_two->bAfbcd_)
         || layer_one->alpha!= layer_two->alpha
         || ((layer_one->bScale_ || layer_two->bScale_) && !ctx.state.bMultiAreaScaleEnable)
         || IsRec1IntersectRec2(&layer_one->display_frame,&layer_two->display_frame)
@@ -124,7 +183,7 @@ bool PlanStageVop2::IsLayerCombine(DrmHwcLayer * layer_one,DrmHwcLayer * layer_t
     return true;
 }
 
-int PlanStageVop2::CombineLayer(LayerMap& layer_map,std::vector<DrmHwcLayer*> &layers,uint32_t iPlaneSize){
+int Vop3399::CombineLayer(LayerMap& layer_map,std::vector<DrmHwcLayer*> &layers,uint32_t iPlaneSize){
 
     /*Group layer*/
     int zpos = 0;
@@ -271,7 +330,7 @@ int PlanStageVop2::CombineLayer(LayerMap& layer_map,std::vector<DrmHwcLayer*> &l
 
 }
 
-bool PlanStageVop2::HasGetNoAfbcUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
+bool Vop3399::HasGetNoAfbcUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
     std::vector<DrmPlane *> usable_planes;
     //loop plane groups.
     for (std::vector<PlaneGroup *> ::const_iterator iter = plane_groups.begin();
@@ -287,7 +346,7 @@ bool PlanStageVop2::HasGetNoAfbcUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGro
   return usable_planes.size() > 0;;
 }
 
-bool PlanStageVop2::HasGetNoYuvUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
+bool Vop3399::HasGetNoYuvUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
     std::vector<DrmPlane *> usable_planes;
     //loop plane groups.
     for (std::vector<PlaneGroup *> ::const_iterator iter = plane_groups.begin();
@@ -303,7 +362,7 @@ bool PlanStageVop2::HasGetNoYuvUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGrou
   return usable_planes.size() > 0;;
 }
 
-bool PlanStageVop2::HasGetNoScaleUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
+bool Vop3399::HasGetNoScaleUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
     std::vector<DrmPlane *> usable_planes;
     //loop plane groups.
     for (std::vector<PlaneGroup *> ::const_iterator iter = plane_groups.begin();
@@ -319,7 +378,7 @@ bool PlanStageVop2::HasGetNoScaleUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGr
   return usable_planes.size() > 0;;
 }
 
-bool PlanStageVop2::HasGetNoAlphaUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
+bool Vop3399::HasGetNoAlphaUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
     std::vector<DrmPlane *> usable_planes;
     //loop plane groups.
     for (std::vector<PlaneGroup *> ::const_iterator iter = plane_groups.begin();
@@ -335,7 +394,7 @@ bool PlanStageVop2::HasGetNoAlphaUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGr
   return usable_planes.size() > 0;
 }
 
-bool PlanStageVop2::HasGetNoEotfUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
+bool Vop3399::HasGetNoEotfUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGroup *> &plane_groups) {
     std::vector<DrmPlane *> usable_planes;
     //loop plane groups.
     for (std::vector<PlaneGroup *> ::const_iterator iter = plane_groups.begin();
@@ -351,11 +410,11 @@ bool PlanStageVop2::HasGetNoEotfUsablePlanes(DrmCrtc *crtc, std::vector<PlaneGro
   return usable_planes.size() > 0;
 }
 
-bool PlanStageVop2::GetCrtcSupported(const DrmCrtc &crtc, uint32_t possible_crtc_mask) {
-  return !!((1 << crtc.pipe()) & possible_crtc_mask);
+bool Vop3399::GetCrtcSupported(const DrmCrtc &crtc, uint32_t possible_crtc_mask) {
+  return ((1 << crtc.pipe()) & possible_crtc_mask) > 0;
 }
 
-bool PlanStageVop2::HasPlanesWithSize(DrmCrtc *crtc, int layer_size, std::vector<PlaneGroup *> &plane_groups) {
+bool Vop3399::HasPlanesWithSize(DrmCrtc *crtc, int layer_size, std::vector<PlaneGroup *> &plane_groups) {
     //loop plane groups.
     for (std::vector<PlaneGroup *> ::const_iterator iter = plane_groups.begin();
        iter != plane_groups.end(); ++iter) {
@@ -366,7 +425,7 @@ bool PlanStageVop2::HasPlanesWithSize(DrmCrtc *crtc, int layer_size, std::vector
   return false;
 }
 
-int PlanStageVop2::MatchPlane(std::vector<DrmCompositionPlane> *composition_planes,
+int Vop3399::MatchPlane(std::vector<DrmCompositionPlane> *composition_planes,
                    std::vector<PlaneGroup *> &plane_groups,
                    DrmCompositionPlane::Type type, DrmCrtc *crtc,
                    std::pair<int, std::vector<DrmHwcLayer*>> layers, int zpos, bool match_best=false) {
@@ -379,19 +438,22 @@ int PlanStageVop2::MatchPlane(std::vector<DrmCompositionPlane> *composition_plan
   uint16_t eotf = TRADITIONAL_GAMMA_SDR;
   bool bMulArea = layer_size > 0 ? true : false;
   DrmDevice *drm = crtc->getDrmDevice();
+  bool bHdrSupport = false;
   DrmConnector *connector = drm->GetConnectorForDisplay(crtc->display());
-  bool bHdrSupport = connector->is_hdmi_support_hdr() && ctx.support.iHdrCnt > 0;
+  if(connector){
+    bHdrSupport = connector->is_hdmi_support_hdr() && ctx.support.iHdrCnt > 0;
+  }
 
   //loop plane groups.
   for (iter = plane_groups.begin();
      iter != plane_groups.end(); ++iter) {
      uint32_t combine_layer_count = 0;
      ALOGD_IF(LogLevel(DBG_DEBUG),"line=%d,last zpos=%d,group(%" PRIu64 ") zpos=%d,group bUse=%d,crtc=0x%x,"
-                                   "current_possible_crtcs=0x%x,possible_crtcs=0x%x",
+                                   "current_crtc_=0x%x,possible_crtcs=0x%x",
                                    __LINE__, zpos, (*iter)->share_id, (*iter)->zpos, (*iter)->bUse,
-                                   (1<<crtc->pipe()), (*iter)->current_possible_crtcs,(*iter)->possible_crtcs);
+                                   (1<<crtc->pipe()), (*iter)->current_crtc_,(*iter)->possible_crtcs);
       //find the match zpos plane group
-      if(!(*iter)->bUse && !(*iter)->bReserved && (((1<<crtc->pipe()) & (*iter)->current_possible_crtcs) > 0))
+      if(!(*iter)->bUse && !(*iter)->bReserved && (((1<<crtc->pipe()) & (*iter)->current_crtc_) > 0))
       {
           ALOGD_IF(LogLevel(DBG_DEBUG),"line=%d,layer_size=%d,planes size=%zu",__LINE__,layer_size,(*iter)->planes.size());
 
@@ -424,57 +486,6 @@ int PlanStageVop2::MatchPlane(std::vector<DrmCompositionPlane> *composition_plan
                       if(!(*iter_plane)->is_use() && (*iter_plane)->GetCrtcSupported(*crtc))
                       {
                           bool bNeed = false;
-
-                          // Cluster
-                          if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN0){
-                                ctx.state.bClu0Used = false;
-                                ctx.state.iClu0UsedZ = -1;
-                                ctx.state.bClu0TwoWinMode = true;
-                                ctx.state.iClu0UsedDstXOffset = 0;
-                          }
-
-                          if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN0){
-                                ctx.state.bClu1Used = false;
-                                ctx.state.iClu1UsedZ = -1;
-                                ctx.state.bClu1TwoWinMode = true;
-                                ctx.state.iClu1UsedDstXOffset = 0;
-                          }
-
-                          if(ctx.state.bClu0Used && ((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN1) > 0 &&
-                             (zpos - ctx.state.iClu0UsedZ) != 1 && !(zpos == ctx.state.iClu0UsedZ))
-                            ctx.state.bClu0TwoWinMode = false;
-
-                          if(ctx.state.bClu1Used && ((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN1) > 0 &&
-                             (zpos - ctx.state.iClu1UsedZ) != 1 && !(zpos == ctx.state.iClu1UsedZ))
-                            ctx.state.bClu1TwoWinMode = false;
-
-                          if(((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN1) > 0){
-                            if(!ctx.state.bClu0TwoWinMode){
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s disable Cluster two win mode",(*iter_plane)->name());
-                              continue;
-                            }
-                            int dst_x_offset = (*iter_layer)->display_frame.left;
-                            if((ctx.state.iClu0UsedDstXOffset % 2) !=  (dst_x_offset % 2)){
-                              ctx.state.bClu0TwoWinMode = false;
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s can't overlay win0-dst-x=%d,win1-dst-x=%d",(*iter_plane)->name(),ctx.state.iClu0UsedDstXOffset,dst_x_offset);
-                              continue;
-                            }
-
-                          }
-
-                          if(((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN1) > 0){
-                            if(!ctx.state.bClu1TwoWinMode){
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s disable Cluster two win mode",(*iter_plane)->name());
-                              continue;
-                            }
-                            int dst_x_offset = (*iter_layer)->display_frame.left;
-
-                            if((ctx.state.iClu1UsedDstXOffset % 2) !=  (dst_x_offset % 2)){
-                              ctx.state.bClu1TwoWinMode = false;
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s can't overlay win0-dst-x=%d,win1-dst-x=%d",(*iter_plane)->name(),ctx.state.iClu1UsedDstXOffset,dst_x_offset);
-                              continue;
-                            }
-                          }
 
                           // Format
                           if((*iter_plane)->is_support_format((*iter_layer)->uFourccFormat_,(*iter_layer)->bAfbcd_)){
@@ -538,7 +549,7 @@ int PlanStageVop2::MatchPlane(std::vector<DrmCompositionPlane> *composition_plan
 
                           // HDR
                           eotf = (*iter_layer)->uEOTF;
-                          b_hdr2sdr = (*iter_plane)->get_hdr2sdr();
+                          b_hdr2sdr = crtc->get_hdr();
                           if(bHdrSupport && eotf != TRADITIONAL_GAMMA_SDR)
                           {
                               if(!b_hdr2sdr)
@@ -554,23 +565,6 @@ int PlanStageVop2::MatchPlane(std::vector<DrmCompositionPlane> *composition_plan
 
                           // Only YUV use Cluster rotate
                           if((*iter_plane)->is_support_transform((*iter_layer)->transform)){
-                            if(((*iter_layer)->transform & (DRM_MODE_REFLECT_X | DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                              // Cluster rotate must 64 align
-                              if(((*iter_layer)->iStride_ % 64 != 0)){
-                                ALOGD_IF(LogLevel(DBG_DEBUG),"%s cann't support layer transform(xmirror or 90 or 270) 0x%x and iStride_ = %d",
-                                        (*iter_plane)->name(), (*iter_layer)->transform,(*iter_layer)->iStride_);
-                                continue;
-                              }
-                            }
-
-                            if(((*iter_layer)->transform & (DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                              //Cluster rotate input_h must <= 2048
-                              if(input_h > 2048){
-                                ALOGD_IF(LogLevel(DBG_DEBUG),"%s cann't support layer transform(90 or 270) 0x%x and input_h = %d",
-                                        (*iter_plane)->name(), (*iter_layer)->transform,input_h);
-                                continue;
-                              }
-                            }
                           }else{
                               ALOGD_IF(LogLevel(DBG_DEBUG),"%s cann't support layer transform 0x%x, support 0x%x",
                                       (*iter_plane)->name(), (*iter_layer)->transform,(*iter_plane)->get_transform());
@@ -614,31 +608,7 @@ int PlanStageVop2::MatchPlane(std::vector<DrmCompositionPlane> *composition_plan
                           (*iter_plane)->set_use(true);
                           composition_planes->back().set_zpos(zpos);
                           combine_layer_count++;
-
-                          // Cluster disable two win mode?
-                          if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN0){
-                              ctx.state.bClu0Used = true;
-                              ctx.state.iClu0UsedZ = zpos;
-                              ctx.state.iClu0UsedDstXOffset = (*iter_layer)->display_frame.left;
-                              if(input_w > 2048 || output_w > 2048 ||  eotf != TRADITIONAL_GAMMA_SDR ||
-                                 ((*iter_layer)->transform & (DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                                  ctx.state.bClu0TwoWinMode = false;
-                              }else{
-                                  ctx.state.bClu0TwoWinMode = true;
-                              }
-                          }else if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN0){
-                              ctx.state.bClu1Used = true;
-                              ctx.state.iClu1UsedZ = zpos;
-                              ctx.state.iClu1UsedDstXOffset = (*iter_layer)->display_frame.left;
-                              if(input_w > 2048 || output_w > 2048 || eotf != TRADITIONAL_GAMMA_SDR ||
-                                ((*iter_layer)->transform & (DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                                  ctx.state.bClu1TwoWinMode = false;
-                              }else{
-                                  ctx.state.bClu1TwoWinMode = true;
-                              }
-                          }
                           break;
-
                       }
                   }
               }
@@ -657,7 +627,7 @@ int PlanStageVop2::MatchPlane(std::vector<DrmCompositionPlane> *composition_plan
   return -1;
 }
 
-int PlanStageVop2::MatchPlaneMirror(std::vector<DrmCompositionPlane> *composition_planes,
+int Vop3399::MatchPlaneMirror(std::vector<DrmCompositionPlane> *composition_planes,
                    std::vector<PlaneGroup *> &plane_groups,
                    DrmCompositionPlane::Type type, DrmCrtc *crtc,
                    std::pair<int, std::vector<DrmHwcLayer*>> layers, int zpos, bool match_best=false) {
@@ -678,11 +648,11 @@ int PlanStageVop2::MatchPlaneMirror(std::vector<DrmCompositionPlane> *compositio
      iter != plane_groups.end(); ++iter) {
      uint32_t combine_layer_count = 0;
      ALOGD_IF(LogLevel(DBG_DEBUG),"line=%d,last zpos=%d,group(%" PRIu64 ") zpos=%d,group bUse=%d,crtc=0x%x,"
-                                   "current_possible_crtcs=0x%x,possible_crtcs=0x%x",
+                                   "current_crtc_=0x%x,possible_crtcs=0x%x",
                                    __LINE__, zpos, (*iter)->share_id, (*iter)->zpos, (*iter)->bUse,
-                                   (1<<crtc->pipe()), (*iter)->current_possible_crtcs,(*iter)->possible_crtcs);
+                                   (1<<crtc->pipe()), (*iter)->current_crtc_,(*iter)->possible_crtcs);
       //find the match zpos plane group
-      if(!(*iter)->bUse && !(*iter)->bReserved && (((1<<crtc->pipe()) & (*iter)->current_possible_crtcs) > 0))
+      if(!(*iter)->bUse && !(*iter)->bReserved && (((1<<crtc->pipe()) & (*iter)->current_crtc_) > 0))
       {
           ALOGD_IF(LogLevel(DBG_DEBUG),"line=%d,layer_size=%d,planes size=%zu",__LINE__,layer_size,(*iter)->planes.size());
 
@@ -715,57 +685,6 @@ int PlanStageVop2::MatchPlaneMirror(std::vector<DrmCompositionPlane> *compositio
                       if(!(*iter_plane)->is_use() && (*iter_plane)->GetCrtcSupported(*crtc))
                       {
                           bool bNeed = false;
-
-                          // Cluster
-                          if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN0){
-                                ctx.state.bClu0Used = false;
-                                ctx.state.iClu0UsedZ = -1;
-                                ctx.state.bClu0TwoWinMode = true;
-                                ctx.state.iClu0UsedDstXOffset = 0;
-                          }
-
-                          if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN0){
-                                ctx.state.bClu1Used = false;
-                                ctx.state.iClu1UsedZ = -1;
-                                ctx.state.bClu1TwoWinMode = true;
-                                ctx.state.iClu1UsedDstXOffset = 0;
-                          }
-
-                          if(ctx.state.bClu0Used && ((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN1) > 0 &&
-                             (zpos - ctx.state.iClu0UsedZ) != 1 && !(zpos == ctx.state.iClu0UsedZ))
-                            ctx.state.bClu0TwoWinMode = false;
-
-                          if(ctx.state.bClu1Used && ((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN1) > 0 &&
-                             (zpos - ctx.state.iClu1UsedZ) != 1 && !(zpos == ctx.state.iClu1UsedZ))
-                            ctx.state.bClu1TwoWinMode = false;
-
-                          if(((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN1) > 0){
-                            if(!ctx.state.bClu0TwoWinMode){
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s disable Cluster two win mode",(*iter_plane)->name());
-                              continue;
-                            }
-                            int dst_x_offset = (*iter_layer)->display_frame.left;
-                            if((ctx.state.iClu0UsedDstXOffset % 2) !=  (dst_x_offset % 2)){
-                              ctx.state.bClu0TwoWinMode = false;
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s can't overlay win0-dst-x=%d,win1-dst-x=%d",(*iter_plane)->name(),ctx.state.iClu0UsedDstXOffset,dst_x_offset);
-                              continue;
-                            }
-
-                          }
-
-                          if(((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN1) > 0){
-                            if(!ctx.state.bClu1TwoWinMode){
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s disable Cluster two win mode",(*iter_plane)->name());
-                              continue;
-                            }
-                            int dst_x_offset = (*iter_layer)->display_frame.left;
-
-                            if((ctx.state.iClu1UsedDstXOffset % 2) !=  (dst_x_offset % 2)){
-                              ctx.state.bClu1TwoWinMode = false;
-                              ALOGD_IF(LogLevel(DBG_DEBUG),"%s can't overlay win0-dst-x=%d,win1-dst-x=%d",(*iter_plane)->name(),ctx.state.iClu1UsedDstXOffset,dst_x_offset);
-                              continue;
-                            }
-                          }
 
                           // Format
                           if((*iter_plane)->is_support_format((*iter_layer)->uFourccFormat_,(*iter_layer)->bAfbcd_)){
@@ -837,7 +756,7 @@ int PlanStageVop2::MatchPlaneMirror(std::vector<DrmCompositionPlane> *compositio
                               {
                                   ALOGV("layer id=%d, plane id=%d",(*iter_layer)->uId_,(*iter_plane)->id());
                                   ALOGD_IF(LogLevel(DBG_DEBUG),"%s cann't support etof,layer eotf=%d,hdr2sdr=%d",
-                                          (*iter_plane)->name(),(*iter_layer)->uEOTF,(*iter_plane)->get_hdr2sdr());
+                                          (*iter_plane)->name(),eotf,b_hdr2sdr);
                                   continue;
                               }
                               else
@@ -846,30 +765,13 @@ int PlanStageVop2::MatchPlaneMirror(std::vector<DrmCompositionPlane> *compositio
 
                           // Only YUV use Cluster rotate
                           if((*iter_plane)->is_support_transform((*iter_layer)->transform)){
-                            if(((*iter_layer)->transform & (DRM_MODE_REFLECT_X | DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                              // Cluster rotate must 64 align
-                              if(((*iter_layer)->iStride_ % 64 != 0)){
-                                ALOGD_IF(LogLevel(DBG_DEBUG),"%s cann't support layer transform(xmirror or 90 or 270) 0x%x and iStride_ = %d",
-                                        (*iter_plane)->name(), (*iter_layer)->transform,(*iter_layer)->iStride_);
-                                continue;
-                              }
-                            }
-
-                            if(((*iter_layer)->transform & (DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                              //Cluster rotate input_h must <= 2048
-                              if(input_h > 2048){
-                                ALOGD_IF(LogLevel(DBG_DEBUG),"%s cann't support layer transform(90 or 270) 0x%x and input_h = %d",
-                                        (*iter_plane)->name(), (*iter_layer)->transform,input_h);
-                                continue;
-                              }
-                            }
                           }else{
                               ALOGD_IF(LogLevel(DBG_DEBUG),"%s cann't support layer transform 0x%x, support 0x%x",
                                       (*iter_plane)->name(), (*iter_layer)->transform,(*iter_plane)->get_transform());
                               continue;
                           }
 
-                          // RK3566 must match external display
+                          // Must match external display
                           {
                               // Output info
                               int output_w = (*iter_layer)->display_frame.right - (*iter_layer)->display_frame.left;
@@ -903,31 +805,7 @@ int PlanStageVop2::MatchPlaneMirror(std::vector<DrmCompositionPlane> *compositio
                           (*iter_plane)->set_use(true);
                           composition_planes->back().set_zpos(zpos);
                           combine_layer_count++;
-
-                          // Cluster disable two win mode?
-                          if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER0_WIN0){
-                              ctx.state.bClu0Used = true;
-                              ctx.state.iClu0UsedZ = zpos;
-                              ctx.state.iClu0UsedDstXOffset = (*iter_layer)->display_frame.left;
-                              if(input_w > 2048 || output_w > 2048 ||
-                                 ((*iter_layer)->transform & (DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                                  ctx.state.bClu0TwoWinMode = false;
-                              }else{
-                                  ctx.state.bClu0TwoWinMode = true;
-                              }
-                          }else if((*iter_plane)->win_type() & DRM_PLANE_TYPE_CLUSTER1_WIN0){
-                              ctx.state.bClu1Used = true;
-                              ctx.state.iClu1UsedZ = zpos;
-                              ctx.state.iClu1UsedDstXOffset = (*iter_layer)->display_frame.left;
-                              if(input_w > 2048 || output_w > 2048 ||
-                                ((*iter_layer)->transform & (DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_270)) != 0){
-                                  ctx.state.bClu1TwoWinMode = false;
-                              }else{
-                                  ctx.state.bClu1TwoWinMode = true;
-                              }
-                          }
                           break;
-
                       }
                   }
               }
@@ -947,7 +825,7 @@ int PlanStageVop2::MatchPlaneMirror(std::vector<DrmCompositionPlane> *compositio
 }
 
 
-void PlanStageVop2::ResetPlaneGroups(std::vector<PlaneGroup *> &plane_groups){
+void Vop3399::ResetPlaneGroups(std::vector<PlaneGroup *> &plane_groups){
   for (auto &plane_group : plane_groups){
     for(auto &p : plane_group->planes)
       p->set_use(false);
@@ -956,14 +834,14 @@ void PlanStageVop2::ResetPlaneGroups(std::vector<PlaneGroup *> &plane_groups){
   return;
 }
 
-void PlanStageVop2::ResetLayer(std::vector<DrmHwcLayer*>& layers){
+void Vop3399::ResetLayer(std::vector<DrmHwcLayer*>& layers){
     for (auto &drmHwcLayer : layers){
       drmHwcLayer->bMatch_ = false;
     }
     return;
 }
 
-int PlanStageVop2::MatchBestPlanes(
+int Vop3399::MatchBestPlanes(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1009,7 +887,7 @@ int PlanStageVop2::MatchBestPlanes(
 }
 
 
-int PlanStageVop2::MatchPlanes(
+int Vop3399::MatchPlanes(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1047,7 +925,7 @@ int PlanStageVop2::MatchPlanes(
   }
   return 0;
 }
-int  PlanStageVop2::GetPlaneGroups(DrmCrtc *crtc, std::vector<PlaneGroup *>&out_plane_groups){
+int  Vop3399::GetPlaneGroups(DrmCrtc *crtc, std::vector<PlaneGroup *>&out_plane_groups){
   DrmDevice *drm = crtc->getDrmDevice();
   out_plane_groups.clear();
   std::vector<PlaneGroup *> all_plane_groups = drm->GetPlaneGroups();
@@ -1066,7 +944,7 @@ int  PlanStageVop2::GetPlaneGroups(DrmCrtc *crtc, std::vector<PlaneGroup *>&out_
   return out_plane_groups.size() > 0 ? 0 : -1;
 }
 
-void PlanStageVop2::ResetLayerFromTmpExceptFB(std::vector<DrmHwcLayer*>& layers,
+void Vop3399::ResetLayerFromTmpExceptFB(std::vector<DrmHwcLayer*>& layers,
                                               std::vector<DrmHwcLayer*>& tmp_layers){
   for (auto i = layers.begin(); i != layers.end();){
       if((*i)->bFbTarget_){
@@ -1097,7 +975,7 @@ void PlanStageVop2::ResetLayerFromTmpExceptFB(std::vector<DrmHwcLayer*>& layers,
 }
 
 
-void PlanStageVop2::ResetLayerFromTmp(std::vector<DrmHwcLayer*>& layers,
+void Vop3399::ResetLayerFromTmp(std::vector<DrmHwcLayer*>& layers,
                                               std::vector<DrmHwcLayer*>& tmp_layers){
   for (auto i = tmp_layers.begin(); i != tmp_layers.end();){
          layers.emplace_back(std::move(*i));
@@ -1115,7 +993,7 @@ void PlanStageVop2::ResetLayerFromTmp(std::vector<DrmHwcLayer*>& layers,
     return;
 }
 
-void PlanStageVop2::MoveFbToTmp(std::vector<DrmHwcLayer*>& layers,
+void Vop3399::MoveFbToTmp(std::vector<DrmHwcLayer*>& layers,
                                        std::vector<DrmHwcLayer*>& tmp_layers){
   for (auto i = layers.begin(); i != layers.end();){
       if((*i)->bFbTarget_){
@@ -1139,7 +1017,7 @@ void PlanStageVop2::MoveFbToTmp(std::vector<DrmHwcLayer*>& layers,
   return;
 }
 
-void PlanStageVop2::OutputMatchLayer(int iFirst, int iLast,
+void Vop3399::OutputMatchLayer(int iFirst, int iLast,
                                           std::vector<DrmHwcLayer *>& layers,
                                           std::vector<DrmHwcLayer *>& tmp_layers){
 
@@ -1177,7 +1055,7 @@ void PlanStageVop2::OutputMatchLayer(int iFirst, int iLast,
   }
   return;
 }
-int PlanStageVop2::TryOverlayPolicy(
+int Vop3399::TryOverlayPolicy(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1196,7 +1074,7 @@ int PlanStageVop2::TryOverlayPolicy(
   }
   return 0;
 }
-int PlanStageVop2::TryMixSkipPolicy(
+int Vop3399::TryMixSkipPolicy(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1207,13 +1085,6 @@ int PlanStageVop2::TryMixSkipPolicy(
   int skipCnt = 0;
 
   int iPlaneSize = plane_groups.size();
-
-  if(ctx.request.iAfbcdCnt == 0){
-    for(auto &plane_group : plane_groups){
-      if(plane_group->win_type & DRM_PLANE_TYPE_CLUSTER_MASK)
-        iPlaneSize--;
-    }
-  }
 
   if(iPlaneSize == 0){
     ALOGE_IF(LogLevel(DBG_DEBUG), "%s:line=%d, iPlaneSize = %d, skip TryMixSkipPolicy",
@@ -1335,7 +1206,7 @@ int PlanStageVop2::TryMixSkipPolicy(
       GLES | 70b34c9080 | 0000 | 0000 | 00 | 0105 | RGBA_8888   |    0.0,    0.0, 2400.0,   84.0 |    0, 1516, 2400, 1600 | taskbar
       GLES | 711ec5a900 | 0000 | 0002 | 00 | 0105 | RGBA_8888   |    0.0,    0.0,   39.0,   49.0 | 1136, 1194, 1175, 1243 | Sprite
 ************************************************************/
-int PlanStageVop2::TryMixVideoPolicy(
+int Vop3399::TryMixVideoPolicy(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1388,7 +1259,7 @@ int PlanStageVop2::TryMixVideoPolicy(
       GLES | 70b34c9080 | 0000 | 0000 | 00 | 0105 | RGBA_8888   |    0.0,    0.0, 2400.0,   84.0 |    0, 1516, 2400, 1600 | taskbar
       GLES | 711ec5a900 | 0000 | 0002 | 00 | 0105 | RGBA_8888   |    0.0,    0.0,   39.0,   49.0 | 1136, 1194, 1175, 1243 | Sprite
 ************************************************************/
-int PlanStageVop2::TryMixUpPolicy(
+int Vop3399::TryMixUpPolicy(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1401,19 +1272,10 @@ int PlanStageVop2::TryMixUpPolicy(
 
   int iPlaneSize = plane_groups.size();
 
-  if(ctx.request.iAfbcdCnt == 0){
-    for(auto &plane_group : plane_groups){
-      if(plane_group->win_type & DRM_PLANE_TYPE_CLUSTER_MASK)
-        iPlaneSize--;
-    }
-  }
-
   if(iPlaneSize == 0){
     ALOGE_IF(LogLevel(DBG_DEBUG), "%s:line=%d, iPlaneSize = %d, skip TryMixSkipPolicy",
               __FUNCTION__,__LINE__,iPlaneSize);
   }
-
-
 
   std::pair<int, int> layer_indices(-1, -1);
 
@@ -1456,7 +1318,7 @@ int PlanStageVop2::TryMixUpPolicy(
        HWC | 711ec5ad80 | 0000 | 0000 | 00 | 0105 | RGBA_8888   |    0.0,    0.0, 2400.0,   84.0 |    0, 1516, 2400, 1600 | taskbar
        HWC | 711ec5a900 | 0000 | 0002 | 00 | 0105 | RGBA_8888   |    0.0,    0.0,   39.0,   49.0 |  941,  810,  980,  859 | Sprite
 ************************************************************/
-int PlanStageVop2::TryMixDownPolicy(
+int Vop3399::TryMixDownPolicy(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1503,7 +1365,7 @@ int PlanStageVop2::TryMixDownPolicy(
   return ret;
 }
 
-int PlanStageVop2::TryMixPolicy(
+int Vop3399::TryMixPolicy(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1536,7 +1398,7 @@ int PlanStageVop2::TryMixPolicy(
   return -1;
 }
 
-int PlanStageVop2::TryGLESPolicy(
+int Vop3399::TryGLESPolicy(
     std::vector<DrmCompositionPlane> *composition,
     std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
     std::vector<PlaneGroup *> &plane_groups) {
@@ -1546,7 +1408,6 @@ int PlanStageVop2::TryGLESPolicy(
   ResetPlaneGroups(plane_groups);
   //save fb into tmp_layers
   MoveFbToTmp(layers, fb_target);
-
 
   if(fb_target.size()==1){
     DrmHwcLayer* fb_layer = fb_target[0];
@@ -1584,22 +1445,8 @@ int PlanStageVop2::TryGLESPolicy(
         ALOGD_IF(LogLevel(DBG_DEBUG),"%s,line=%d Has Cluster Plane, FB enables AFBC",__FUNCTION__,__LINE__);
       }
     }
-    // RK3566 must match external display
-    if(ctx.state.bCommitMirrorMode && ctx.state.pCrtcMirror!=NULL){
-      if(fb_layer->bAfbcd_){
-        fb_layer->iBestPlaneType = DRM_PLANE_TYPE_CLUSTER_MASK;
-      }else if(fb_layer->bScale_ || fb_layer->fHScaleMulMirror_ != 1.0 || fb_layer->fVScaleMulMirror_ != 1.0){
-        fb_layer->iBestPlaneType = DRM_PLANE_TYPE_ESMART0_MASK | DRM_PLANE_TYPE_ESMART1_MASK;
-      }else{
-        fb_layer->iBestPlaneType = DRM_PLANE_TYPE_SMART0_MASK | DRM_PLANE_TYPE_SMART1_MASK;
-      }
-    }else{
-        fb_layer->iBestPlaneType = DRM_PLANE_TYPE_CLUSTER_MASK | DRM_PLANE_TYPE_ESMART0_MASK |
-                                   DRM_PLANE_TYPE_ESMART1_MASK | DRM_PLANE_TYPE_SMART0_MASK |
-                                   DRM_PLANE_TYPE_SMART1_MASK;
-    }
   }
-  int ret = MatchBestPlanes(composition,fb_target,crtc,plane_groups);
+  int ret = MatchPlanes(composition,fb_target,crtc,plane_groups);
   if(!ret)
     return ret;
   else{
@@ -1609,7 +1456,7 @@ int PlanStageVop2::TryGLESPolicy(
   return 0;
 }
 
-void PlanStageVop2::UpdateResevedPlane(DrmCrtc *crtc){
+void Vop3399::UpdateResevedPlane(DrmCrtc *crtc){
   // Reserved DrmPlane
   char reserved_plane_name[PROPERTY_VALUE_MAX] = {0};
   hwc_get_string_property("vendor.hwc.reserved_plane_name","NULL",reserved_plane_name);
@@ -1673,7 +1520,110 @@ void PlanStageVop2::UpdateResevedPlane(DrmCrtc *crtc){
   return;
 }
 
-void PlanStageVop2::InitRequestContext(std::vector<DrmHwcLayer*> &layers){
+/*
+ * CLUSTER_AFBC_DECODE_MAX_RATE = 3.2
+ * (src(W*H)/dst(W*H))/(aclk/dclk) > CLUSTER_AFBC_DECODE_MAX_RATE to use GLES compose.
+ * Notes: (4096,1714)=>(1080,603) appear( DDR 1560M ), CLUSTER_AFBC_DECODE_MAX_RATE=2.839350
+ * Notes: (4096,1714)=>(1200,900) appear( DDR 1056M ), CLUSTER_AFBC_DECODE_MAX_RATE=2.075307
+ */
+#define CLUSTER_AFBC_DECODE_MAX_RATE 2.0
+bool Vop3399::CheckGLESLayer(DrmHwcLayer *layer){
+  // RK356x can't overlay RGBA1010102
+  if(layer->iFormat_ == HAL_PIXEL_FORMAT_RGBA_1010102){
+    HWC2_ALOGD_IF_DEBUG("[%s]：RGBA1010102 format, not support overlay.",
+              layer->sLayerName_.c_str());
+    return true;
+  }
+
+
+  int act_w = static_cast<int>(layer->source_crop.right - layer->source_crop.left);
+  int act_h = static_cast<int>(layer->source_crop.bottom - layer->source_crop.top);
+  int dst_w = static_cast<int>(layer->display_frame.right - layer->display_frame.left);
+  int dst_h = static_cast<int>(layer->display_frame.bottom - layer->display_frame.top);
+
+  // RK platform VOP can't display src/dst w/h < 4 layer.
+  if(act_w < 4 || act_h < 4 || dst_w < 4 || dst_h < 4){
+    HWC2_ALOGD_IF_DEBUG("[%s]：[%dx%d] => [%dx%d] too small to use GLES composer.",
+              layer->sLayerName_.c_str(),act_w,act_h,dst_w,dst_h);
+    return true;
+  }
+
+  // RK356x Cluster can't overlay act_w % 4 != 0 afbcd layer.
+  if(layer->bAfbcd_){
+    if(act_w % 4 != 0)
+      return true;
+    //  (src(W*H)/dst(W*H))/(aclk/dclk) > rate = CLUSTER_AFBC_DECODE_MAX_RATE, Use GLES compose
+    if(layer->uAclk_ > 0 && layer->uDclk_ > 0){
+        char value[PROPERTY_VALUE_MAX];
+        property_get("vendor.hwc.cluster_afbc_decode_max_rate", value, "0");
+        double cluster_afbc_decode_max_rate = atof(value);
+
+        HWC2_ALOGD_IF_VERBOSE("[%s]：scale-rate=%f, allow_rate = %f, "
+                  "property_rate=%f, fHScaleMul_ = %f, fVScaleMul_ = %f, uAclk_ = %d, uDclk_=%d ",
+                  layer->sLayerName_.c_str(),
+                  (layer->fHScaleMul_ * layer->fVScaleMul_) / (layer->uAclk_/(layer->uDclk_ * 1.0)),
+                  cluster_afbc_decode_max_rate ,CLUSTER_AFBC_DECODE_MAX_RATE,
+                  layer->fHScaleMul_ ,layer->fVScaleMul_ ,layer->uAclk_ ,layer->uDclk_);
+      if(cluster_afbc_decode_max_rate > 0){
+        if((layer->fHScaleMul_ * layer->fVScaleMul_) / (layer->uAclk_/(layer->uDclk_ * 1.0)) > cluster_afbc_decode_max_rate){
+          HWC2_ALOGD_IF_DEBUG("[%s]：scale too large(%f) to use GLES composer, allow_rate = %f, "
+                    "property_rate=%f, fHScaleMul_ = %f, fVScaleMul_ = %f, uAclk_ = %d, uDclk_=%d ",
+                    layer->sLayerName_.c_str(),
+                    (layer->fHScaleMul_ * layer->fVScaleMul_) / (layer->uAclk_/(layer->uDclk_ * 1.0)),
+                    CLUSTER_AFBC_DECODE_MAX_RATE,
+                    cluster_afbc_decode_max_rate, layer->fHScaleMul_ ,
+                    layer->fVScaleMul_ ,layer->uAclk_ ,layer->uDclk_);
+          return true;
+        }
+      }else if((layer->fHScaleMul_ * layer->fVScaleMul_) / (layer->uAclk_/(layer->uDclk_ * 1.0)) > CLUSTER_AFBC_DECODE_MAX_RATE){
+        HWC2_ALOGD_IF_DEBUG("[%s]：scale too large(%f) to use GLES composer, allow_rate = %f, "
+                  "property_rate=%f, fHScaleMul_ = %f, fVScaleMul_ = %f, uAclk_ = %d, uDclk_=%d ",
+                  layer->sLayerName_.c_str(),
+                  (layer->fHScaleMul_ * layer->fVScaleMul_) / (layer->uAclk_/(layer->uDclk_ * 1.0)),
+                  CLUSTER_AFBC_DECODE_MAX_RATE,
+                  cluster_afbc_decode_max_rate, layer->fHScaleMul_ ,
+                  layer->fVScaleMul_ ,layer->uAclk_ ,layer->uDclk_);
+        return true;
+      }
+    }
+  }
+
+  // RK356x Esmart can't overlay act_w % 16 == 1 and fHScaleMul_ < 1.0 layer.
+  if(!layer->bAfbcd_){
+    if(act_w % 16 == 1 && layer->fHScaleMul_ < 1.0){
+      HWC2_ALOGD_IF_DEBUG("[%s]：RK356x Esmart can't overlay act_w %% 16 == 1 and fHScaleMul_ < 1.0 layer.",
+              layer->sLayerName_.c_str());
+      return true;
+    }
+
+    int dst_w = static_cast<int>(layer->display_frame.right - layer->display_frame.left);
+    if(dst_w % 2 == 1 && layer->fHScaleMul_ < 1.0){
+      HWC2_ALOGD_IF_DEBUG("[%s]：RK356x Esmart can't overlay dst_w %% 2 == 1 and fHScaleMul_ < 1.0 layer.",
+              layer->sLayerName_.c_str());
+      return true;
+    }
+  }
+
+  if(layer->transform == -1){
+    HWC2_ALOGD_IF_DEBUG("[%s]：RK356x Esmart can't overlay dst_w %% 2 == 1 and fHScaleMul_ < 1.0 layer.",
+            layer->sLayerName_.c_str());
+    return true;
+  }
+
+  switch(layer->sf_composition){
+    case HWC2::Composition::Client:
+    case HWC2::Composition::Sideband:
+    case HWC2::Composition::SolidColor:
+      HWC2_ALOGD_IF_DEBUG("[%s]：sf_composition =0x%x not support overlay.",
+              layer->sLayerName_.c_str(),layer->sf_composition);
+      return true;
+    default:
+      break;
+  }
+  return false;
+}
+
+void Vop3399::InitRequestContext(std::vector<DrmHwcLayer*> &layers){
 
   // Collect layer info
   ctx.request.iAfbcdCnt=0;
@@ -1691,6 +1641,12 @@ void PlanStageVop2::InitRequestContext(std::vector<DrmHwcLayer*> &layers){
   ctx.request.iHdrCnt=0;
 
   for(auto &layer : layers){
+    if(CheckGLESLayer(layer)){
+      layer->bGlesCompose_ = true;
+    }else{
+      layer->bGlesCompose_ = false;
+    }
+
     if(layer->bFbTarget_)
       continue;
 
@@ -1743,7 +1699,7 @@ void PlanStageVop2::InitRequestContext(std::vector<DrmHwcLayer*> &layers){
   return;
 }
 
-void PlanStageVop2::InitSupportContext(
+void Vop3399::InitSupportContext(
     std::vector<PlaneGroup *> &plane_groups,
     DrmCrtc *crtc){
   // Collect Plane resource info
@@ -1804,7 +1760,7 @@ void PlanStageVop2::InitSupportContext(
   return;
 }
 
-void PlanStageVop2::InitStateContext(
+void Vop3399::InitStateContext(
     std::vector<DrmHwcLayer*> &layers,
     std::vector<PlaneGroup *> &plane_groups,
     DrmCrtc *crtc){
@@ -1860,7 +1816,7 @@ void PlanStageVop2::InitStateContext(
   return;
 }
 
-void PlanStageVop2::InitCrtcMirror(
+void Vop3399::InitCrtcMirror(
     std::vector<DrmHwcLayer*> &layers,
     std::vector<PlaneGroup *> &plane_groups,
     DrmCrtc *crtc){
@@ -1998,7 +1954,7 @@ void PlanStageVop2::InitCrtcMirror(
   return;
 }
 
-bool PlanStageVop2::TryOverlay(){
+bool Vop3399::TryOverlay(){
   if(ctx.request.iAfbcdCnt <= ctx.support.iAfbcdCnt &&
      ctx.request.iScaleCnt <= ctx.support.iScaleCnt &&
      ctx.request.iYuvCnt <= ctx.support.iYuvCnt &&
@@ -2010,7 +1966,7 @@ bool PlanStageVop2::TryOverlay(){
   return false;
 }
 
-void PlanStageVop2::TryMix(){
+void Vop3399::TryMix(){
   ctx.state.setHwcPolicy.insert(HWC_MIX_LOPICY);
   ctx.state.setHwcPolicy.insert(HWC_MIX_UP_LOPICY);
   if(ctx.support.iYuvCnt > 0 || ctx.support.iAfbcdYuvCnt > 0)
@@ -2019,7 +1975,7 @@ void PlanStageVop2::TryMix(){
     ctx.state.setHwcPolicy.insert(HWC_MIX_SKIP_LOPICY);
 }
 
-int PlanStageVop2::InitContext(
+int Vop3399::InitContext(
     std::vector<DrmHwcLayer*> &layers,
     std::vector<PlaneGroup *> &plane_groups,
     DrmCrtc *crtc,
@@ -2035,7 +1991,7 @@ int PlanStageVop2::InitContext(
   //force go into GPU
   int iMode = hwc_get_int_property("vendor.hwc.compose_policy","0");
 
-  if((iMode!=1 || gles_policy) && iMode != 2){
+  if(((iMode!=1 && iMode!=6) || gles_policy) && iMode != 2){
     ctx.state.setHwcPolicy.insert(HWC_GLES_POLICY);
     ALOGD_IF(LogLevel(DBG_DEBUG),"Force use GLES compose, iMode=%d, gles_policy=%d, soc_id=%x",iMode,gles_policy,ctx.state.iSocId);
     return 0;
@@ -2055,68 +2011,5 @@ int PlanStageVop2::InitContext(
 
   return 0;
 }
-int PlanStageVop2::TryHwcPolicy(
-    std::vector<DrmCompositionPlane> *composition,
-    std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc,
-    bool gles_policy) {
-
-  // Get PlaneGroup
-  std::vector<PlaneGroup *> plane_groups;
-  int ret = GetPlaneGroups(crtc,plane_groups);
-  if(ret){
-    ALOGE("%s,line=%d can't get plane_groups size=%zu",__FUNCTION__,__LINE__,plane_groups.size());
-    return -1;
-  }
-
-  // Init context
-  InitContext(layers,plane_groups,crtc,gles_policy);
-
-  // Try to match overlay policy
-  if(ctx.state.setHwcPolicy.count(HWC_OVERLAY_LOPICY)){
-    ret = TryOverlayPolicy(composition,layers,crtc,plane_groups);
-    if(!ret)
-      return 0;
-    else{
-      ALOGD_IF(LogLevel(DBG_DEBUG),"Match overlay policy fail, try to match other policy.");
-      TryMix();
-    }
-  }
-
-  // Try to match mix policy
-  if(ctx.state.setHwcPolicy.count(HWC_MIX_LOPICY)){
-    ret = TryMixPolicy(composition,layers,crtc,plane_groups);
-    if(!ret)
-      return 0;
-    else{
-      ALOGD_IF(LogLevel(DBG_DEBUG),"Match mix policy fail, try to match other policy.");
-      ctx.state.setHwcPolicy.insert(HWC_GLES_POLICY);
-    }
-  }
-
-  // Try to match GLES policy
-  if(ctx.state.setHwcPolicy.count(HWC_GLES_POLICY)){
-    ret = TryGLESPolicy(composition,layers,crtc,plane_groups);
-    if(!ret)
-      return 0;
-  }
-
-  ALOGE("%s,%d Can't match HWC policy",__FUNCTION__,__LINE__);
-  return -1;
-}
-
-bool PlanStageVop2::SupportPlatform(uint32_t soc_id){
-  switch(soc_id){
-    case 0x3566:
-    case 0x3568:
-    // after ECO
-    case 0x3566a:
-    case 0x3568a:
-      return true;
-    default:
-      break;
-  }
-  return false;
-}
-
 }
 

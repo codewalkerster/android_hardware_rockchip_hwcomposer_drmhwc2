@@ -99,8 +99,6 @@ uint64_t get_format_modifier(buffer_handle_t handle);
 
 uint32_t get_fourcc_format(buffer_handle_t handle);
 
-uint64_t get_internal_format(buffer_handle_t handle);
-
 int get_width(buffer_handle_t handle, uint64_t* width);
 
 int get_height(buffer_handle_t handle, uint64_t* height);
@@ -129,7 +127,7 @@ using android::status_t;
 
 status_t importBuffer(buffer_handle_t rawHandle, buffer_handle_t* outHandle);
 
-void freeBuffer(buffer_handle_t handle);
+status_t freeBuffer(buffer_handle_t handle);
 
 status_t lock(buffer_handle_t bufferHandle,
               uint64_t usage,

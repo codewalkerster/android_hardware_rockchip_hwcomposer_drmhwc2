@@ -61,6 +61,8 @@ class DrmMode {
              uint32_t flags, uint32_t clock) const;
   void ToDrmModeModeInfo(drm_mode_modeinfo *m) const;
 
+  void dump() const;
+
   uint32_t id() const;
   void set_id(uint32_t id);
 
@@ -82,6 +84,7 @@ class DrmMode {
   uint32_t flags() const;
   uint32_t interlaced() const;
   uint32_t type() const;
+  bool is_8k_mode() const;
 
   std::string name() const;
 

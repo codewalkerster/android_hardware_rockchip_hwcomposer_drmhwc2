@@ -33,8 +33,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef ANDROID_DRM_VOP2_H_
-#define ANDROID_DRM_VOP2_H_
+#ifndef ANDROID_DRM_VOP_3399_H_
+#define ANDROID_DRM_VOP_3399_H_
 
 #include "platform.h"
 #include "drmdevice.h"
@@ -47,7 +47,7 @@ class DrmDevice;
 // This plan stage places as many layers on dedicated planes as possible (first
 // come first serve), and then sticks the rest in a precomposition plane (if
 // needed).
-class PlanStageVop2 : public Planner::PlanStage {
+class Vop3399 : public Planner::PlanStage {
 
 typedef std::map<int, std::vector<DrmHwcLayer*>> LayerMap;
 
@@ -108,21 +108,10 @@ typedef struct StateContext{
   bool bCommitMirrorMode=false;
   DrmCrtc *pCrtcMirror=NULL;
 
-  // Cluster 0/1 two win mode
-  bool bClu0TwoWinMode=false;
-  bool bClu1TwoWinMode=false;
-  bool bClu0Used=false;
-  bool bClu1Used=false;
-  int iClu0UsedZ=-1;
-  int iClu1UsedZ=-1;
-  int iClu0UsedDstXOffset=0;
-  int iClu1UsedDstXOffset=0;
-
   // Multi area
   bool bMultiAreaEnable=false;
   bool bMultiAreaScaleEnable=false;
   bool bMultiAreaMode=false;
-  bool bSmartScaleEnable=false;
 
   // Video state
   bool bLargeVideo=false;
@@ -140,11 +129,16 @@ typedef struct DrmVop2Context{
 } Vop2Ctx;
 
  public:
-  PlanStageVop2(){ Init(); }
+  Vop3399(){ Init(); }
   void Init();
   bool SupportPlatform(uint32_t soc_id);
   int TryHwcPolicy(std::vector<DrmCompositionPlane> *composition,
-                        std::vector<DrmHwcLayer*> &layers, DrmCrtc *crtc, bool gles_policy);
+                   std::vector<DrmHwcLayer*> &layers,
+                   std::vector<PlaneGroup *> &plane_groups,
+                   DrmCrtc *crtc,
+                   bool gles_policy);
+  // Try to assign DrmPlane to display
+  int TryAssignPlane(DrmDevice* drm, const std::map<int,int> map_dpys);
 
  protected:
   int TryOverlayPolicy(std::vector<DrmCompositionPlane> *composition,
@@ -178,6 +172,7 @@ typedef struct DrmVop2Context{
   void TryMix();
   void InitCrtcMirror(std::vector<DrmHwcLayer*> &layers,std::vector<PlaneGroup *> &plane_groups,DrmCrtc *crtc);
   void UpdateResevedPlane(DrmCrtc *crtc);
+  bool CheckGLESLayer(DrmHwcLayer* layers);
   void InitStateContext(
       std::vector<DrmHwcLayer*> &layers,
       std::vector<PlaneGroup *> &plane_groups,
