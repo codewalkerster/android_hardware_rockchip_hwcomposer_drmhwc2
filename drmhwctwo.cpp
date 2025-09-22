@@ -1020,7 +1020,11 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayConfigs(uint32_t *num_configs,
        * RK3588：Limit to 4096x2160 if large than 2160p
        * Other:  Limit to 1920x1080 if large than 2160p
        */
-      if(isRK3588(resource_manager_->getSocId())){
+      //ODROID
+      char value[PROPERTY_VALUE_MAX];
+      property_get("persist.framebuffer.support4kUI", value, "false");
+      if(isRK3588(resource_manager_->getSocId()) ||
+        (strncmp(value, "true", 4) == 0)){
         if (ctx_.framebuffer_height >= 2160 && ctx_.framebuffer_width >= ctx_.framebuffer_height) {
           ctx_.framebuffer_width = ctx_.framebuffer_width * (2160.0 / ctx_.framebuffer_height);
           ctx_.framebuffer_height = 2160;
